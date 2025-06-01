@@ -1,7 +1,11 @@
 const express = require("express");
 const app = express();
+const router= require('./routes/allroutes');
 
 app.use(express.urlencoded({ extended: true }));
+
+//route
+app.use('/api',router)
 
 app.get("/", (req, res) => {
   res.send("BattleCode Backend");
