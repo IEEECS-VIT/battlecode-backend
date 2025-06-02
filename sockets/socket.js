@@ -1,12 +1,11 @@
-function generateRoomID()
-{
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let id = '';
-    for (let i = 0; i < 6; i++) 
-        {
-           id += chars.charAt(Math.floor(Math.random() * chars.length));
-        }
-    return id;
+function generateRoomID() {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "";
+  for (let i = 0; i < 6; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return id;
 }
 
 function initializeSocket(io) {
@@ -20,4 +19,4 @@ function initializeSocket(io) {
   });
 }
 
-module.exports = initializeSocket;
+export default initializeSocket;
