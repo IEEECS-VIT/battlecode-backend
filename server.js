@@ -6,7 +6,7 @@ const router= require('../battlecode project/routes/allroutes');
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const httpServer = createServer(app);  //creates httpserver
-const io = new Server(httpServer, {}); //creates socket server
+const io = new Server(httpServer, {cors: {origin: "*",methods: ["GET", "POST"]}});  
 
 const initializeSocket = require("./sockets/socket");
 initializeSocket(io); 
