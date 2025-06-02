@@ -6,17 +6,20 @@ services:
     env_file:
       - .env
     depends_on:
-      - db
+      - redis
     volumes:
       - .:/usr/src/app
       - /usr/src/app/node_modules
+    restart: unless-stopped 
 
-  db:
-    image: postgres:15
-    env_file:
-      - .env
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
 
 volumes:
-  postgres_data:
+  redis_data:

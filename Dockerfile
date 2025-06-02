@@ -1,5 +1,7 @@
 FROM node:22-alpine
 
+RUN apk add --no-cache redis
+
 WORKDIR /usr/src/app
 
 COPY package*.json ./
@@ -12,6 +14,5 @@ COPY . .
 
 EXPOSE 5000
 
-RUN npm run build
-
-CMD ["npm","run", "start"]
+# Use this instead of migrate deploy
+CMD ["sh", "-c", "npx prisma migrate deploy && npm run start"]
