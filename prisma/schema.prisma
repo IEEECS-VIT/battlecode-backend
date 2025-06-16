@@ -35,6 +35,10 @@ model Stats {
   eloRating      Int      @default(0)
   gamesPlayed    Int      @default(0)
   totalTimeSpent Int      @default(0)
+  problemsSolved Int      @default(0)
+  winRate        Float    @default(0.0)
+  streak         Int      @default(0)
+  maxStreak      Int      @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -43,20 +47,36 @@ model Stats {
 
 model Problem {
   id                String   @id @default(uuid())
-  title             String
+  title             String   @unique
   description       String
-  sampleCases       String[]
-  hiddenTestCases   String[]
-  category          String[]
+  difficulty        Difficulty
   constraints       String[]
+  hints             String[]
+  boilerplate       Json
+  functionSignatures Json
+  sampleTestCases   Json
+  hiddenTestCases   Json
+  systemDesign      Json
+  categories        Category[] @relation("ProblemCategories")
   avgTimeComplexity String
   avgSpaceComplexity String
-  difficulty        String
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   matches     Match[]      @relation("ProblemMatches")
   submissions Submission[]
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+model Category {
+  id       String    @id @default(uuid())
+  name     String    @unique
+  problems Problem[] @relation("ProblemCategories")
 }
 
 model Match {
@@ -65,6 +85,7 @@ model Match {
   playerBId  String
   winnerId   String?
   duration   Int
+  status     MatchStatus @default(ONGOING)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
@@ -75,20 +96,39 @@ model Match {
   submissions Submission[]
 }
 
+enum MatchStatus {
+  ONGOING
+  COMPLETED
+  TIMEOUT
+  ABANDONED
+}
+
 model Submission {
   id              String   @id @default(uuid())
-  matchId         String
+  matchId         String?
   problemId       String
   playerId        String
   code            String
   language        String
+  status          SubmissionStatus
+  runtime         Int?
+  memory          Int?
   testCasesPassed Int
   totalTestCases  Int
   isCheat         Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  match           Match    @relation(fields: [matchId], references: [id])
+  match           Match?   @relation(fields: [matchId], references: [id])
   problem         Problem  @relation(fields: [problemId], references: [id])
   player          User     @relation(fields: [playerId], references: [id])
+}
+
+enum SubmissionStatus {
+  PENDING
+  ACCEPTED
+  WRONG_ANSWER
+  TIME_LIMIT_EXCEEDED
+  COMPILATION_ERROR
+  RUNTIME_ERROR
 }
