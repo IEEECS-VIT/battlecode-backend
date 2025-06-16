@@ -51,7 +51,6 @@ model Problem {
   description       String
   difficulty        Difficulty
   constraints       String[]
-  examples          Json
   hints             String[]
   boilerplate       Json
   functionSignatures Json
