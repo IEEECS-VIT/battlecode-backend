@@ -14,8 +14,7 @@ const getActiveMatchesKey = () => "active_matches";
 async function createMatch(matchId, matchData) {
   await redis.setex(getMatchKey(matchId), 86400, JSON.stringify(matchData));
   await redis.sadd(getActiveMatchesKey(), matchId);
-}
-
+  
 async function getMatch(matchId) {
   const data = await redis.get(getMatchKey(matchId));
   return data ? JSON.parse(data) : null;
@@ -126,6 +125,7 @@ export default function initializeSocket(io) {
         timeLimit: match.settings.timeLimit,
         question: questions[0],
         questionIndex: 0,
+
       });
     });
 
