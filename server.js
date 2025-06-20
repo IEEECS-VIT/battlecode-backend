@@ -2,9 +2,9 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import routes from "./routes/index.js";
-import prisma from "./battlecode-backend/config/prisma.js";
-import redis from "./battlecode-backend/config/redis.js";
-import initializeSocket from "./battlecode-backend/sockets/socket.js";
+import prisma from "./config/prisma.js";
+import redis from "./config/redis.js";
+import initializeSocket from "./sockets/socket.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -26,7 +26,6 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use("/api", routes);
-
 
 app.get("/", (req, res) => {
   res.send("BattleCode Backend");

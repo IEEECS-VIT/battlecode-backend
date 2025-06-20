@@ -1,5 +1,5 @@
 import express from 'express';
-import prisma from '../battlecode-backend/config/prisma.js';
+import prisma from '../config/prisma.js';
 import verifyAuthToken from '../middleware/authMiddleware.js';
 
 const router = express.Router();

@@ -1,4 +1,4 @@
-import supabase from "../battlecode-backend/config/supabase.js";
+import supabase from "../config/supabase.js";
 
 // Express middleware for HTTP requests
 const verifyAuthToken = async (req, res, next) => {

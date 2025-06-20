@@ -3,6 +3,7 @@ import { createServer } from "http";
 import express from "express";
 import redis from "../config/redis.js";
 import { verifySocketToken } from "../middleware/authMiddleware.js";
+import { GetQuestions } from "../controller/matchController.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -109,14 +110,22 @@ export default function initializeSocket(io) {
       const match = await getMatch(matchId);
       if (!match || match.status !== "READY") return;
 
+      const {noOfQuestions,difficulty}=match.settings;
+      const questions = await GetQuestions(noOfQuestions,difficulty);
+
       match.status = "IN_PROGRESS";
       match.startedAt = new Date().toISOString();
+      match.questions=questions;
+      match.currentQuestionIndex = 0;
+
       await updateMatch(matchId, match);
 
       io.to(matchId).emit("matchStarted", {
         matchId,
         startTime: match.startedAt,
-        timeLimit: match.settings.timeLimit
+        timeLimit: match.settings.timeLimit,
+        question: questions[0],
+        questionIndex: 0,
       });
     });
 
