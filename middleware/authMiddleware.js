@@ -1,5 +1,6 @@
-import supabase from "../config/supabase.js";
+import supabase from "../battlecode-backend/config/supabase.js";
 
+// Express middleware for HTTP requests
 const verifyAuthToken = async (req, res, next) => {
   const authToken = req.headers.authorization?.split(" ")[1];
 
@@ -27,4 +28,30 @@ const verifyAuthToken = async (req, res, next) => {
   }
 };
 
+// Socket.IO specific token verification (returns promise)
+const verifySocketToken = async (token) => {
+  if (!token) {
+    throw new Error("No token provided");
+  }
+
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error) {
+      console.error("Socket auth error:", error);
+      throw new Error("Invalid or expired auth token");
+    }
+
+    if (!data?.user) {
+      throw new Error("User not found");
+    }
+
+    return data.user;
+  } catch (err) {
+    console.error("Socket auth verification error:", err);
+    throw err;
+  }
+};
+
 export default verifyAuthToken;
+export { verifySocketToken };

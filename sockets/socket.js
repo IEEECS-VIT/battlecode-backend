@@ -1,74 +1,127 @@
-import prisma from '../config/prisma.js';
-import redisClient from '../config/redis.js';
+import { Server } from "socket.io";
+import { createServer } from "http";
+import express from "express";
+import redis from "../config/redis.js";
+import { verifySocketToken } from "../middleware/authMiddleware.js";
 
-function generateRoomID() {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
-  for (let i = 0; i < 6; i++) {
-    id += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return id;
+const app = express();
+const httpServer = createServer(app);
+
+const getMatchKey = (matchId) => `match:${matchId}`;
+const getActiveMatchesKey = () => "active_matches";
+
+async function createMatch(matchId, matchData) {
+  await redis.setex(getMatchKey(matchId), 86400, JSON.stringify(matchData));
+  await redis.sadd(getActiveMatchesKey(), matchId);
 }
 
-function initializeSocket(io) {
+async function getMatch(matchId) {
+  const data = await redis.get(getMatchKey(matchId));
+  return data ? JSON.parse(data) : null;
+}
+
+async function updateMatch(matchId, matchData) {
+  await redis.setex(getMatchKey(matchId), 86400, JSON.stringify(matchData));
+}
+
+export default function initializeSocket(io) {
+  io.use(async (socket, next) => {
+    try {
+      const token =
+        socket.handshake.auth.token ||
+        socket.handshake.headers.authorization?.replace("Bearer ", "");
+      if (!token) throw new Error("No token provided");
+
+      const user = await verifySocketToken(token);
+      socket.user = user;
+      next();
+    } catch (error) {
+      next(new Error("Authentication failed"));
+    }
+  });
+
   io.on("connection", (socket) => {
-    console.log("A user connected:", socket.id);
+    console.log(`User connected: ${socket.user.id}`);
 
-    socket.on("createRoom", async (settings) => {
+    // 1. Create Match
+    socket.on("createMatch", async (settings, callback) => {
       try {
-        const roomId = generateRoomID();
-        const {playerAId,playerBId = null,timer = 300} = settings;
-
+        const matchId = generateMatchId();
         const matchData = {
-          id: roomId,
-          playerAId,
-          duration: timer,
-          ...(playerBId ? { playerBId } : {})}
+          id: matchId,
+          playerAId: socket.user.id,
+          status: "WAITING",
+          settings: {
+            timeLimit: settings.timeLimit || 30,
+            noOfQuestions: settings.noOfQuestions,
+            difficulty: settings.difficulty || "MEDIUM",
+          },
+          createdAt: new Date().toISOString(),
+        };
 
-        await prisma.match.create({
-          data: {id: roomId, duration: timer, playerAId: playerAId , playerBId: "12"},});
+        await createMatch(matchId, matchData);
+        socket.join(matchId);
 
-        await redisClient.hset(`match:${roomId}`, {playerAId,playerBId,timer});
+        callback({
+          success: true,
+          matchId,
+          playerId: socket.user.id,
+        });
 
-        socket.emit("roomCreated", { roomId, settings });
-        socket.join(roomId);
-
-      } catch (err) {
-        console.error("Error creating room:", err);
-        socket.emit("error", "Failed to create room.");
+        io.to(matchId).emit("matchCreated", matchData);
+      } catch (error) {
+        callback({ error: "Failed to create match" });
       }
     });
 
-    socket.on("joinRoom", async ({ roomId, playerId }) => {
+    // 2. Join Match
+    socket.on("joinMatch", async ({ matchId }, callback) => {
       try {
-        const roomData = await redisClient.hgetall(`match:${roomId}`);
+        const match = await getMatch(matchId);
+        if (!match) throw new Error("Match not found");
+        if (match.playerBId) throw new Error("Match is full");
 
-        if (!roomData.playerAId) 
-        {
-          return socket.emit("error", "Room not found.");
-        }
+        match.playerBId = socket.user.id;
+        match.status = "READY";
+        await updateMatch(matchId, match);
 
-        if (!roomData.playerBId) 
-        {
-          await redisClient.hset(`match:${roomId}`, { playerBId: playerId });
-          await prisma.match.update({
-            where: { id: roomId },
-            data: { playerBId: playerId }});
-        }
+        socket.join(matchId);
 
-        socket.join(roomId);
-        console.log(`User ${playerId} joined room ${roomId}`);
-      } catch (err) {
-        console.error("Error joining room:", err);
-        socket.emit("error", "Failed to join room.");
+        callback({
+          success: true,
+          matchId,
+          playerId: socket.user.id,
+        });
+
+        io.to(matchId).emit("matchReady", {
+          matchId,
+          playerAId: match.playerAId,
+          playerBId: match.playerBId,
+          settings: match.settings,
+        });
+      } catch (error) {
+        callback({ error: error.message });
       }
     });
 
-    socket.on("disconnect", () => {
-      console.log("User has disconnected:", socket.id);
+    // 3. Start Match 
+    socket.on("startMatch", async ({ matchId }) => {
+      const match = await getMatch(matchId);
+      if (!match || match.status !== "READY") return;
+
+      match.status = "IN_PROGRESS";
+      match.startedAt = new Date().toISOString();
+      await updateMatch(matchId, match);
+
+      io.to(matchId).emit("matchStarted", {
+        matchId,
+        startTime: match.startedAt,
+        timeLimit: match.settings.timeLimit
+      });
     });
+
+    function generateMatchId() {
+      return Math.random().toString(36).substring(2, 8).toUpperCase();
+    }
   });
 }
-
-export default initializeSocket;

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import prisma from "../config/prisma.js";
+import prisma from "../battlecode-backend/config/prisma.js";
 
 const router = Router();
 
