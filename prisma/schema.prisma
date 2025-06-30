@@ -53,10 +53,8 @@ model Problem {
   constraints       String[]
   hints             String[]
   boilerplate       Json
-  functionSignatures Json
   sampleTestCases   Json
   hiddenTestCases   Json
-  systemDesign      Json
   categories        Category[] @relation("ProblemCategories")
   avgTimeComplexity String
   avgSpaceComplexity String

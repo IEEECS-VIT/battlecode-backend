@@ -1,6 +1,8 @@
 import { Router } from "express";
 import userRoutes from "./user.routes.js";
-import testRoute from './testRoute.js';
+import testRoute from "./testRoute.js";
+// import problemRoutes from "./problemRoutes.js";
+// import submitRoutes from "./submit.js";
 
 const router = Router();
 
@@ -10,6 +12,8 @@ router.get("/", (req, res) => {
 });
 
 router.use("/user", userRoutes);
-router.use('/test', testRoute);
+router.use("/test", testRoute);
+// router.use("/problem", problemRoutes);
+// router.use("/submission", submitRoutes);
 
 export default router;
