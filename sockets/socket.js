@@ -4,6 +4,7 @@ import { createServer } from "http";
 import express from "express";
 import redis from "../config/redis.js";
 import { verifySocketToken } from "../middleware/authMiddleware.js";
+import { GetQuestions } from "../controller/matchController.js";
 
 const app = express();
 const httpServer = createServer(app);
