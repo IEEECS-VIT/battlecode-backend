@@ -133,14 +133,37 @@ export default function initializeSocket(io) {
           throw new Error("At least one topic is required");
         }
 
+        // --- MODIFICATION START ---
+        // Validate that either timeLimit or noOfQuestions is provided, but not both.
+        const hasTimeLimit =
+          settings.hasOwnProperty("timeLimit") && settings.timeLimit;
+        const hasNoOfQuestions =
+          settings.hasOwnProperty("noOfQuestions") && settings.noOfQuestions;
+
+        if (hasTimeLimit && hasNoOfQuestions) {
+          throw new Error(
+            "Provide either a time limit OR number of questions, not both."
+          );
+        }
+
+        if (!hasTimeLimit && !hasNoOfQuestions) {
+          throw new Error(
+            "Provide either a time limit OR number of questions."
+          );
+        }
+        // --- MODIFICATION END ---
+
         const matchId = generateMatchId();
         const matchData = {
           id: matchId,
           playerAId: socket.user.id,
           status: "WAITING",
           settings: {
-            timeLimit: settings.timeLimit || 30,
-            noOfQuestions: settings.noOfQuestions || 5,
+            // --- MODIFICATION START ---
+            // Conditionally add the provided setting
+            ...(hasTimeLimit && { timeLimit: settings.timeLimit }),
+            ...(hasNoOfQuestions && { noOfQuestions: settings.noOfQuestions }),
+            // --- MODIFICATION END ---
             difficulty: settings.difficulty || "MEDIUM",
             topics: settings.topics,
           },
@@ -234,8 +257,14 @@ export default function initializeSocket(io) {
         if (match.playerAId !== socket.user.id)
           throw new Error("Only the match creator can start the match");
 
+        // --- MODIFICATION START ---
+        // If noOfQuestions is not set, it's a timed match. We'll fetch a default
+        // number of questions, and the game will be limited by the timer on the client.
+        const noOfQuestionsToFetch = match.settings.noOfQuestions || 50;
+        // --- MODIFICATION END ---
+
         console.log("🔍 Match validation passed, fetching questions with:", {
-          noOfQuestions: match.settings.noOfQuestions,
+          noOfQuestions: noOfQuestionsToFetch,
           difficulty: match.settings.difficulty,
           topics: match.settings.topics,
         });
@@ -244,7 +273,7 @@ export default function initializeSocket(io) {
         let questions;
         try {
           questions = await GetProblems(
-            match.settings.noOfQuestions,
+            noOfQuestionsToFetch, // Use the potentially defaulted value
             match.settings.difficulty,
             match.settings.topics
           );

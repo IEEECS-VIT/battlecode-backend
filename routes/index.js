@@ -15,6 +15,6 @@ router.get("/", (req, res) => {
 router.use("/user", userRoutes);
 router.use("/test", testRoute);
 // router.use("/problem", problemRoutes);
-// router.use("/submission", submitRoutes);
+router.use("/submit", submitRoutes);
 
 export default router;
