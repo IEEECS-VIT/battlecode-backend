@@ -46,8 +46,8 @@ model Stats {
 }
 
 model Problem {
-  id                String   @id @default(uuid())
-  title             String   @unique
+  id                String     @id @default(uuid())
+  title             String     @unique
   description       String
   difficulty        Difficulty
   constraints       String[]
@@ -58,8 +58,8 @@ model Problem {
   categories        Category[] @relation("ProblemCategories")
   avgTimeComplexity String
   avgSpaceComplexity String
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   matches     Match[]      @relation("ProblemMatches")
   submissions Submission[]

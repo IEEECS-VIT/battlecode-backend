@@ -2,7 +2,7 @@ import { Router } from "express";
 import userRoutes from "./user.routes.js";
 import testRoute from "./testRoute.js";
 // import problemRoutes from "./problemRoutes.js";
-// import submitRoutes from "./submit.js";
+import submitRoutes from "./submit.js";
 // import matchRoutes from './matchRoutes.js';
 
 const router = Router();

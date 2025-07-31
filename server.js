@@ -33,7 +33,7 @@ app.get("/", (req, res) => {
   res.send("BattleCode Backend");
 });
 
-const PORT = 5000;
+const PORT = 8000;
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
