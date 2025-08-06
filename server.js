@@ -2,10 +2,8 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import routes from "./routes/index.js";
-import prisma from "./config/prisma.js";
-import redis from "./config/redis.js";
 import cors from "cors";
-import initializeSocket from "./sockets/socket.js";
+import initializeSocket from "./sockets/index.js";
 
 const app = express();
 const httpServer = createServer(app);

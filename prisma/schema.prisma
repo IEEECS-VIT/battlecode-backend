@@ -7,62 +7,10 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Global Enums
 enum Role {
   ADMIN
   PLAYER
-}
-
-model User {
-  id         String   @id @default(uuid())
-  username   String   @unique
-  email      String   @unique
-  role       Role     @default(PLAYER)
-  badges     String[] @default([])
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
-  matchesAsPlayerA Match[] @relation("PlayerAMatches")
-  matchesAsPlayerB Match[] @relation("PlayerBMatches")
-  matchesAsWinner  Match[] @relation("WinnerMatches")
-
-  stats       Stats?
-  submissions Submission[]
-}
-
-model Stats {
-  id             String   @id @default(uuid())
-  userId         String   @unique
-  eloRating      Int      @default(0)
-  gamesPlayed    Int      @default(0)
-  totalTimeSpent Int      @default(0)
-  problemsSolved Int      @default(0)
-  winRate        Float    @default(0.0)
-  streak         Int      @default(0)
-  maxStreak      Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  user           User     @relation(fields: [userId], references: [id])
-}
-
-model Problem {
-  id                String     @id @default(uuid())
-  title             String     @unique
-  description       String
-  difficulty        Difficulty
-  constraints       String[]
-  hints             String[]
-  boilerplate       Json
-  sampleTestCases   Json
-  hiddenTestCases   Json
-  categories        Category[] @relation("ProblemCategories")
-  avgTimeComplexity String
-  avgSpaceComplexity String
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
-
-  matches     Match[]      @relation("ProblemMatches")
-  submissions Submission[]
 }
 
 enum Difficulty {
@@ -71,55 +19,17 @@ enum Difficulty {
   HARD
 }
 
-model Category {
-  id       String    @id @default(uuid())
-  name     String    @unique
-  problems Problem[] @relation("ProblemCategories")
-}
-
-model Match {
-  id         String    @id @default(uuid())
-  playerAId  String
-  playerBId  String
-  winnerId   String?
-  duration   Int
-  status     MatchStatus @default(ONGOING)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-
-  playerA    User      @relation("PlayerAMatches", fields: [playerAId], references: [id])
-  playerB    User      @relation("PlayerBMatches", fields: [playerBId], references: [id])
-  winner     User?     @relation("WinnerMatches", fields: [winnerId], references: [id])
-  problems   Problem[] @relation("ProblemMatches")
-  submissions Submission[]
-}
-
-enum MatchStatus {
-  ONGOING
+// Event-Specific Enums
+enum RoundStatus {
+  LOCKED
+  LOBBY
+  IN_PROGRESS
   COMPLETED
-  TIMEOUT
-  ABANDONED
 }
 
-model Submission {
-  id              String   @id @default(uuid())
-  matchId         String?
-  problemId       String
-  playerId        String
-  code            String
-  language        String
-  status          SubmissionStatus
-  runtime         Int?
-  memory          Int?
-  testCasesPassed Int
-  totalTestCases  Int
-  isCheat         Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  match           Match?   @relation(fields: [matchId], references: [id])
-  problem         Problem  @relation(fields: [problemId], references: [id])
-  player          User     @relation(fields: [playerId], references: [id])
+enum Round2Role {
+  ELITE
+  CHALLENGER
 }
 
 enum SubmissionStatus {
@@ -129,4 +39,146 @@ enum SubmissionStatus {
   TIME_LIMIT_EXCEEDED
   COMPILATION_ERROR
   RUNTIME_ERROR
+}
+
+enum HackStatus {
+  PENDING_REVIEW
+  SUCCESSFUL
+  FAILED
+}
+
+// Core Models
+model User {
+  id           String @id // This is the Supabase Auth ID
+  name         String
+  regNo        String @unique
+  username     String @unique
+  email        String @unique
+  role         Role   @default(PLAYER)
+
+  // Event-specific fields
+  eventScore   Int        @default(0)
+  currentRound Int        @default(0)
+  round2Role   Round2Role?
+
+  // Event relations
+  submissions    Submission[]
+  lockedSolutions LockedSolution[]
+  hackAttempts   HackAttempt[]    @relation("HackerAttempts")
+  hackedAttempts HackAttempt[]    @relation("TargetAttempts")
+
+  // Retaining generic 1v1 match relations for Rounds 1 & 2
+  matchesAsPlayerA Match[] @relation("PlayerAMatches")
+  matchesAsPlayerB Match[] @relation("PlayerBMatches")
+  matchesAsWinner  Match[] @relation("WinnerMatches")
+}
+
+model Round {
+  roundNumber Int         @id // 0, 1, 2, 3
+  status      RoundStatus @default(LOCKED)
+
+  // Relations
+  problems    Problem[]
+  submissions Submission[]
+}
+
+model Problem {
+  id                 String     @id @default(uuid())
+  title              String     @unique
+  description        String
+  difficulty         Difficulty
+  constraints        String[]
+  hints              String[]   @default([])
+  boilerplate        Json?
+  sampleTestCases    Json
+  hiddenTestCases    Json
+  avgTimeComplexity  String?
+  avgSpaceComplexity String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  // Event relations
+  roundId            Int
+  round              Round      @relation(fields: [roundId], references: [roundNumber])
+  submissions        Submission[]
+  lockedSolutions    LockedSolution[]
+  hackAttempts       HackAttempt[]
+
+  // Category relation
+  categories         Category[] @relation("ProblemCategories")
+}
+
+model Category {
+  id       String    @id @default(uuid())
+  name     String    @unique
+  problems Problem[] @relation("ProblemCategories")
+}
+
+model Submission {
+  id               String           @id @default(uuid())
+  userId           String
+  problemId        String
+  roundId          Int
+  code             String
+  language         String
+  status           SubmissionStatus
+  runtime          Int? // Time taken for execution
+  memory           Int? // Memory used
+  testCasesPassed  Int? // Number of test cases that passed
+  executionCount   Int              @default(1)
+  createdAt        DateTime         @default(now())
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id])
+  problem Problem @relation(fields: [problemId], references: [id])
+  round   Round   @relation(fields: [roundId], references: [roundNumber])
+}
+
+
+// Round 1 & 2 Specific Model
+model Match {
+  id        String   @id @default(uuid())
+  playerAId String
+  playerBId String
+  winnerId  String?
+  problemId String
+  status    String   // ONGOING, COMPLETED
+  timeLeft  Int?     // Time left on the clock when the match ended
+  createdAt DateTime @default(now())
+
+  // Relations
+  playerA User @relation("PlayerAMatches", fields: [playerAId], references: [id])
+  playerB User @relation("PlayerBMatches", fields: [playerBId], references: [id])
+  winner  User? @relation("WinnerMatches", fields: [winnerId], references: [id])
+}
+
+
+// Round 3 Specific Models
+model LockedSolution {
+  id         String   @id @default(uuid())
+  userId     String
+  questionId String
+  createdAt  DateTime @default(now())
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id])
+  problem Problem @relation(fields: [questionId], references: [id])
+
+  // A user can only lock a specific question once
+  @@unique([userId, questionId])
+}
+
+model HackAttempt {
+  id          String     @id @default(uuid())
+  hackerId    String
+  targetId    String
+  questionId  String
+  customInput String
+  status      HackStatus @default(PENDING_REVIEW)
+  createdAt   DateTime   @default(now())
+
+  // Relations
+  hacker  User    @relation("HackerAttempts", fields: [hackerId], references: [id])
+  target  User    @relation("TargetAttempts", fields: [targetId], references: [id])
+  problem Problem @relation(fields: [questionId], references: [id])
 }

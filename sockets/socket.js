@@ -277,9 +277,9 @@ export default function initializeSocket(io) {
             match.settings.difficulty,
             match.settings.topics
           );
-          console.log("✅ Questions fetched successfully:", questions.length);
+          console.log("Questions fetched successfully:", questions.length);
         } catch (questionError) {
-          console.error("❌ Error fetching questions:", questionError);
+          console.error("Error fetching questions:", questionError);
 
           // Try to provide more helpful error messages
           if (questionError.message.includes("No questions found")) {
@@ -307,7 +307,7 @@ export default function initializeSocket(io) {
         }
 
         console.log(
-          "📝 Questions loaded:",
+          "Questions loaded:",
           questions.map((q) => ({
             id: q.id,
             title: q.title,
@@ -331,7 +331,7 @@ export default function initializeSocket(io) {
         };
 
         await updateMatch(matchId, match);
-        console.log("✅ Match updated with questions and started");
+        console.log("Match updated with questions and started");
 
         const firstQuestion = questions[0];
         const questionData = {
@@ -372,8 +372,8 @@ export default function initializeSocket(io) {
         if (callback) callback({ success: true });
         io.to(matchId).emit("matchStarted", response);
       } catch (error) {
-        console.error("❌ Start match error:", error);
-        console.error("❌ Error stack:", error.stack);
+        console.error("Start match error:", error);
+        console.error("Error stack:", error.stack);
 
         const errorMessage = error.message || "Failed to start match";
         if (callback) callback({ success: false, error: errorMessage });
