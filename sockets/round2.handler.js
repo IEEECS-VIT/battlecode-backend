@@ -34,19 +34,20 @@ export const round2Handler = (io, socket) => {
 
     const handleLobbyJoin=async (callback)=>{
       try{
-        const UserId=socket.user.id;
+        const userId=socket.user.id;
         const lobbyId="round2:lobby"; //defining sorted redis set for the lobby
 
         //fetching round 1 scores from redis
-        const round1Score=await redis.hget("round1:scores",UserId);
+        const round1Score=await redis.hget("round1:scores",userId);
         if(!round1Score){
           return callback({success:false,message:"Round 1 score of player not found."});
         }
 
-        await redis.zadd(lobbyId,round1Score,UserId); //store users on the basis of round1 score in the ss
+        await redis.zadd(lobbyId, { score: round1Score, value: userId }); //store users on the basis of round1 score in the ss
         socket.join(lobbyId); 
-        socket.join(UserId); //join personal room for targeted emits
-        io.to(lobbyId).emit("Player joined",UserId); 
+        socket.join(userId); //join personal room for targeted emits
+        io.to(lobbyId).emit("Player joined",userId);
+        await redis.set(`round2:lastActive:${userId}`, Date.now()); 
 
         callback({success:true});
       }catch(err){
@@ -83,6 +84,7 @@ export const round2Handler = (io, socket) => {
           const role = i<eliteCount ? "elite":"challenger";
 
           await redis.hset(`round2:roles`,playerId,role);
+          await redis.set(`round2:lastActive:${playerId}`, Date.now());
 
           io.to(playerId).emit("round2:rolesAssigned", { role });
 
@@ -176,6 +178,7 @@ export const round2Handler = (io, socket) => {
         }
 
         await redis.hset(sessionKey, { codeSnapshot: code }); //autosave
+        await redis.set(`round2:lastActive:${userId}`, Date.now());
         callback?.({ success: true });
 
       }catch(err){
@@ -184,21 +187,44 @@ export const round2Handler = (io, socket) => {
       }
     }
 
-    //6.round2:submitlogic - first solve bonus and points 
+    //6.bounty suggestion (server -> client ) - when inactive for over 5 mins
+    const suggestBounty = async(userId)=>{
+      try{
+        const lastActive=await redis.get(`round2:lastActive:${userId}`);
+        if(!lastActive) return;
 
-    //7.bounty suggestion (server -> client ) - when inactive for over 5 mins
+        const idleTime = Date.now()-parseInt(lastActive);
+        if(idleTime>5*60*1000)
+        {
+          io.to(userId).emit("round2:bountySuggestion",{
+            message:"You've been inactive for a while there. Maybe try bounty questions to boost your scores."
+          });
+        }
 
+      }catch(err){
+        console.error("Error in suggestBounty handler: ",err);
+      }
+    }
 
     //socket events
     socket.on("client:sendMessage", handleClientMessage); 
-    socket.on("Join",handleLobbyJoin); 
-    socket.on("Start",handleStart); 
-    socket.on("bountyStart",handleBountyStart); 
+
+    //basic sockets
+
+    //lobby sockets
+    socket.on("round2:Join",handleLobbyJoin); 
+    socket.on("round2:Start",handleStart); 
+
+    //bounty sockets
+    socket.on("round2:bountyStart",handleBountyStart); 
     socket.on("round2:bountyProgress",bountyProgress); 
-    socket.on("bounty:questionStart",handleBountyBeginQuestion)
+    socket.on("bounty:questionStart",handleBountyBeginQuestion);
+    
+    //elite vs challenger sockets
    
   };
   
 //TO DO: 1. make the timer persistant 
+//2. submit logic me integrate first submit + scoring + leaderboard update
 
 

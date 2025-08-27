@@ -4,6 +4,8 @@ import { Server } from "socket.io";
 import routes from "./routes/index.js";
 import cors from "cors";
 import initializeSocket from "./sockets/index.js";
+import redis from "./config/redis.js";
+import { suggestBounty } from "./sockets/round2.js";
 
 const app = express();
 const httpServer = createServer(app);
