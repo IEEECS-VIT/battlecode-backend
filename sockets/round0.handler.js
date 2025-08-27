@@ -2,6 +2,7 @@ import { Server } from "socket.io";
 import { createServer } from "http";
 import express from "express";
 import redis from "../config/redis.js";
+import { io } from "./socket.js"
 import { verifySocketToken } from "../middleware/authMiddleware.js";
 // round0_handler.js
 
@@ -25,7 +26,7 @@ export const round0Handler = (io, socket) => {
   
     socket.on("client:sendMessage", handleClientMessage);
 
-  // Handle question fetch for round 0
+  //fetch for round 0
   const fetchQuestion = async (payload, callback) => {
     try {
       const {difficulty = 'EASY', categories = [], limit = 1 } = payload || {};   //all keys with pairs defined in payload will be given to the variables difficulty, catgeories, limit
@@ -42,7 +43,7 @@ export const round0Handler = (io, socket) => {
       }
 
 
-      // Emit to frontend with socket event 'questionFetched'
+      // Emit to frontend with 'questionFetched'
       socket.emit('questionFetched', { question: questions[0] });
 
       
@@ -63,7 +64,7 @@ export const round0Handler = (io, socket) => {
   socket.on('fetchQuestion', fetchQuestion);
   
 
-  // Join lobby (equivalent to /join HTTP POST)
+  // Join lobby 
   const joinLobby = async (payload, callback) => {
     try {
       const userId = socket.user?.id;
@@ -183,7 +184,7 @@ const reconnectRound0 = async (payload, callback) => {
 
       const gameState = JSON.parse(gameStateRaw);
 
-      // Expected gameState to have structure like:
+      // Gamestate must be like:-
       // {
       //   questions: [...],
       //   currentQuestionIndex: number,
@@ -209,10 +210,8 @@ const reconnectRound0 = async (payload, callback) => {
     }
   };
 
-  // Register reconnect event listener
+  // Reconnect event listener
   socket.on('round0:reconnect', reconnectRound0);
-
-  // Other event listeners like joinLobby, leaveLobby etc.
 
 
 
