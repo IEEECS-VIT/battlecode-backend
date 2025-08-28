@@ -1,6 +1,6 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-import { io } from "../sockets/socket.js"; 
+import { io } from "./socket.js"; 
 
 
 
@@ -105,113 +105,7 @@ async function matchGroup(group, difficulty, timerSeconds) {
   }
 }
 
-export function handleRound1Join(socket) {
-  socket.on("round1:join", async ({ userId }) => {
-    try {
-      // Use multi for hset operation and additional tracking
-      const multi = redis.multi();
-      multi.hset(`round1:participants:${userId}`, {
-        status: "lobby",
-        username: socket.user?.username || "Unknown",
-        rank: socket.user?.rank ?? 0, 
-      });
-      // Add to lobby set for easier tracking
-      multi.sadd("round1:lobby:users", userId);
-      // Set TTL for cleanup
-      multi.expire(`round1:participants:${userId}`, 3600); // 1 hour
-      await multi.exec();
 
-      console.log(`${socket.user?.username || "Unknown"} joined round 1 lobby`);
-
-      //broadcast it to the others
-      const keys = await redis.keys("round1:participants:*");
-      const participants = [];
-      
-      // Batch all hgetall operations using multi for better performance
-      if (keys.length > 0) {
-        const multi = redis.multi();
-        keys.forEach(key => multi.hgetall(key));
-        const results = await multi.exec();
-        
-        results.forEach((result, index) => {
-          if (result[0] === null && result[1]) {
-            const participant = result[1];
-            participants.push({ id: keys[index].split(":").pop(), ...participant });
-          }
-        });
-      }
-
-      // Emit the updated participants list to all clients
-      io.emit("lobby:round1", participants);
-    }
-    catch(error) {
-      console.error("Error in round1:join:", error);
-    }
-  });
-}
-
-export function handleRound1Ready(socket) {
-  socket.on("round1:ready", async () => {
-    try {
-      console.log("Admin started Round 1");
-
-      await prisma.round.update({
-        where: { roundNumber: 1 },
-        data: { status: "IN_PROGRESS" },
-      });
-
-      setTimeout(async () => {
-        console.log("Round 1 ended!");
-        await prisma.round.update({
-          where: { roundNumber: 1 },
-          data: { status: "COMPLETED" },
-        });
-        io.emit("round1:ended");
-      }, 90 * 60 * 1000);
-
-      const keys = await redis.keys("round1:participants:*");
-      
-      // Batch all operations using multi for better performance
-      if (keys.length > 0) {
-        // First, get all participant data in one batch
-        const getMulti = redis.multi();
-        keys.forEach(key => getMulti.hgetall(key));
-        const participantResults = await getMulti.exec();
-        
-        // Process results and prepare batch operations
-        const updateMulti = redis.multi();
-        let playersMoved = 0;
-        
-        participantResults.forEach((result, index) => {
-          if (result[0] === null && result[1]) {
-            const player = result[1];
-            const userId = keys[index].split(":").pop();
-            
-            if (player.status === "lobby") {
-              // Update status to waiting
-              updateMulti.hset(keys[index], { status: "waiting" });
-              // Add to ready queue
-              updateMulti.zadd("round1:readyQueue", player.rank || 0, userId);
-              playersMoved++;
-            }
-          }
-        });
-        
-        // Execute all operations atomically
-        if (playersMoved > 0) {
-          await updateMulti.exec();
-          console.log(`Moved ${playersMoved} players to readyQueue`);
-        }
-      }
-
-      console.log("Moved lobby players to readyQueue");
-
-      setInterval(runMatchmaking, 5000);
-    } catch (err) {
-      console.error("Error in round1:ready:", err);
-    }
-  });
-}
 
 export const round1Handler = (io, socket) => {
     const handleClientMessage = (payload, callback) => {
