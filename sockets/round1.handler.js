@@ -1,6 +1,6 @@
-import redis from "./redis.js";
+import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-import { io } from "./socket.js"; 
+import { io } from "../sockets/socket.js"; 
 
 
 
@@ -54,6 +54,11 @@ async function matchGroup(group, difficulty, timerSeconds) {
       orderBy: { createdAt: "desc" }, // pick latest (or randomize later)
     });
 
+    if (!problem) {
+      console.error(`No problem found for difficulty: ${difficulty}`);
+      continue;
+    }
+
     const match = await prisma.match.create({
       data: {
         playerAId: p1.userId,
@@ -63,8 +68,12 @@ async function matchGroup(group, difficulty, timerSeconds) {
       },
     });
 
-    // 2. Remove from readyQueue
-    await redis.zrem("round1:readyQueue", p1.userId, p2.userId);
+    // 2. Remove from readyQueue using multi for atomicity
+    const multi = redis.multi();
+    multi.zrem("round1:readyQueue", p1.userId, p2.userId);
+    // Optionally track matched players
+    multi.sadd("round1:matched", p1.userId, p2.userId);
+    await multi.exec();
 
     // 3. Emit event to both players
     io.to(p1.userId).emit("round1:matchFound", {
@@ -86,7 +95,11 @@ async function matchGroup(group, difficulty, timerSeconds) {
     const lonePlayer = group[group.length - 1];
     console.log(`Assigning ${lonePlayer.userId} to Team Bot`);
 
-    await redis.zrem("round1:readyQueue", lonePlayer.userId);
+    // Remove from readyQueue using multi
+    const multi = redis.multi();
+    multi.zrem("round1:readyQueue", lonePlayer.userId);
+    multi.sadd("round1:lone", lonePlayer.userId);
+    await multi.exec();
 
     // Can create a dummy match vs BOT here
   }
@@ -95,20 +108,37 @@ async function matchGroup(group, difficulty, timerSeconds) {
 export function handleRound1Join(socket) {
   socket.on("round1:join", async ({ userId }) => {
     try {
-      await redis.hset(`round1:participants:${user.id}`, {
+      // Use multi for hset operation and additional tracking
+      const multi = redis.multi();
+      multi.hset(`round1:participants:${userId}`, {
         status: "lobby",
-        username: user.username,
-        rank: user.rank ?? 0, 
+        username: socket.user?.username || "Unknown",
+        rank: socket.user?.rank ?? 0, 
       });
+      // Add to lobby set for easier tracking
+      multi.sadd("round1:lobby:users", userId);
+      // Set TTL for cleanup
+      multi.expire(`round1:participants:${userId}`, 3600); // 1 hour
+      await multi.exec();
 
-      console.log(`${user.username} joined round 1 lobby`);
+      console.log(`${socket.user?.username || "Unknown"} joined round 1 lobby`);
 
       //broadcast it to the others
       const keys = await redis.keys("round1:participants:*");
       const participants = [];
-      for (const key of keys) {
-        const participant = await redis.hgetall(key);
-        participants.push({ id: key.split(":").pop(), ...participant });
+      
+      // Batch all hgetall operations using multi for better performance
+      if (keys.length > 0) {
+        const multi = redis.multi();
+        keys.forEach(key => multi.hgetall(key));
+        const results = await multi.exec();
+        
+        results.forEach((result, index) => {
+          if (result[0] === null && result[1]) {
+            const participant = result[1];
+            participants.push({ id: keys[index].split(":").pop(), ...participant });
+          }
+        });
       }
 
       // Emit the updated participants list to all clients
@@ -140,11 +170,37 @@ export function handleRound1Ready(socket) {
       }, 90 * 60 * 1000);
 
       const keys = await redis.keys("round1:participants:*");
-      for (const key of keys) {
-        const player = await redis.hgetall(key);
-        if (player.status === "lobby") {
-          await redis.hset(key, { status: "waiting" });
-          await redis.zadd("round1:readyQueue", player.rank, key.split(":").pop());
+      
+      // Batch all operations using multi for better performance
+      if (keys.length > 0) {
+        // First, get all participant data in one batch
+        const getMulti = redis.multi();
+        keys.forEach(key => getMulti.hgetall(key));
+        const participantResults = await getMulti.exec();
+        
+        // Process results and prepare batch operations
+        const updateMulti = redis.multi();
+        let playersMoved = 0;
+        
+        participantResults.forEach((result, index) => {
+          if (result[0] === null && result[1]) {
+            const player = result[1];
+            const userId = keys[index].split(":").pop();
+            
+            if (player.status === "lobby") {
+              // Update status to waiting
+              updateMulti.hset(keys[index], { status: "waiting" });
+              // Add to ready queue
+              updateMulti.zadd("round1:readyQueue", player.rank || 0, userId);
+              playersMoved++;
+            }
+          }
+        });
+        
+        // Execute all operations atomically
+        if (playersMoved > 0) {
+          await updateMulti.exec();
+          console.log(`Moved ${playersMoved} players to readyQueue`);
         }
       }
 
