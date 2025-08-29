@@ -151,7 +151,7 @@ export const round0Handler = (io, socket) => {
     io.emit('lobby', lobbyParticipants);
   
   }
-  io.on('lobby',lobby);
+  socket.on('lobby',lobby);
 
   const nextProblem = async(_,callback) =>{ 
     const userId = socket.user?.id;     
