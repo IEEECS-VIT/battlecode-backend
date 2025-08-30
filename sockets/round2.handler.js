@@ -7,14 +7,6 @@ const LEVEL_TIME_LIMIT_MS = {
   hard: 30 * 60 * 1000,
 };
 
-const LEVEL_POINTS = {
-  easy: 50,
-  medium: 100,
-  hard: 150,
-};
-
-const FIRST_SOLVE_BONUS = 50;
-
 export const round2Handler = (io, socket) => {
     const handleClientMessage = (payload, callback) => {
       console.log(
@@ -83,7 +75,7 @@ export const round2Handler = (io, socket) => {
           const playerId=players[i*2];
           const role = i<eliteCount ? "elite":"challenger";
 
-          await redis.hset(`round2:roles`,playerId,role);
+          await redis.set(`round2:role:${playerId}`, role);
           await redis.set(`round2:lastActive:${playerId}`, Date.now());
 
           io.to(playerId).emit("round2:rolesAssigned", { role });
@@ -206,6 +198,158 @@ export const round2Handler = (io, socket) => {
       }
     }
 
+    //7.challenge request (client -> server)
+    const handleChallengeRequest=async(payload,callback)=>{
+      try{
+        const challengerId=socket.user.id;
+        const { eliteId } = payload;
+
+        //verify roles
+        const [challengerRole,eliteRole]=await redis.mget(`round2:role:${challengerId}`,`round2:role:${eliteId}`);
+
+        if(challengerRole!=="challenger")
+        {
+          return callback?.({success:false,message:"Only challengers can send match requests"});
+        }
+
+        if(eliteRole!=="elite")
+        {
+          return callback?.({success:false,message:"Only elites can be challenged for matches"});
+        }
+
+        //check status
+        const [challengerStatus,eliteStatus]=await Promise.all([
+          redis.get(`round2:status:${challengerId}`),
+          redis.get(`round2:status:${eliteId}`),
+        ]);
+
+        if(challengerStatus==="inMatch")
+        {
+          return callback?.({success:false,message:"You are already lined up for a match."});
+        }
+
+        if(eliteStatus==="inMatch")
+        {
+          return callback?.({success:false,message:"Cannot challenge an elite when they are in match."});
+        }
+
+        const requestKey = `round2:request:${challengerId}:${eliteId}`;
+        const pendingZ = `round2:pending:${eliteId}`; //elite's sorted set of reqs
+        const outgoingSet= `round2:outgoing:${challengerId}`;
+
+        const requestData = {challengerId,eliteId,createdAt:Date.now()};
+        const setResult = await redis.set(requestKey,JSON.stringify(requestData),{
+          NX:true, //only sets key if it doesn't exist already
+          EX:30,
+        })
+
+        if(!setResult)
+        {
+          return callback?.({success:false,message:"You already have an active request to this elite."});
+        }
+
+        await redis
+        .multi() //creates queue of commands to be run together
+        .zadd(pendingZ,{score:Date.now(),value:challengerId}) //chronoligically arranged reqs
+        .sadd(outgoingSet,eliteId) 
+        .expire(outgoingSet,40) //to ensure autodelete post expiration of req
+        .expire(pendingZ, 300) // auto-clean elite’s pending request queue
+        .exec();
+
+        io.to(eliteId).emit("round2:challengeIncoming",{challengerId,expiresIn:30});
+
+        return callback?.({success:true,message:"Challenge request sent."});
+
+      }catch(err){
+        console.error("Error in handleChallengeRequest",err);
+        callback({success:false,message:"Server error"});
+      }
+    }
+
+    const handleChallengeAccept = async(payload,callback)=>{
+      try{
+        const eliteId = socket.user.id;
+        const {challengerId} = payload;
+
+        const requestKey=`round2:request:${challengerId}:${eliteId}`;
+        const requestData = await redis.get(requestKey);
+        if(!requestData)
+        {
+          return callback?.({success:false,message:"No active request found."});
+        }
+        
+        const matchId=`match:${challengerId}:${eliteId}:${Date.now()}`;
+
+        await redis.multi()
+        .zrem(`round2:pending:${eliteId}`,challengerId) //removes accepted challenger from queue
+        .srem(`round2:outgoing:${challengerId}`, eliteId)
+        .del(requestKey)
+        .set(`round2:status:${challengerId}`, "inMatch", "EX", 2400)
+        .set(`round2:status:${eliteId}`, "inMatch", "EX", 2400)
+        .set(`round2:match:${matchId}`, JSON.stringify({ challengerId, eliteId, createdAt: Date.now() }), "EX", 2400) //keeping a quick lookup of the match for persistance
+        .exec()
+
+        //auto-reject unaccepted requests
+        const pendingKey = `round2:pending:${eliteId}`;
+        const pending = await redis.zrange(pendingKey, 0, -1); 
+
+        for (const otherChallengerId of pending) {
+        if (otherChallengerId === challengerId) continue; 
+
+        const otherRequestKey = `round2:request:${otherChallengerId}:${eliteId}`;
+        const outgoingKey = `round2:outgoing:${otherChallengerId}`;
+
+        await redis
+        .multi()
+        .del(otherRequestKey)
+        .zrem(pendingKey, otherChallengerId)
+        .srem(outgoingKey, eliteId)
+        .exec();
+        
+        io.to(otherChallengerId).emit("round2:challengeRejected", {
+        eliteId,
+        challengerId: otherChallengerId,
+        reason: "Elite accepted another challenge",
+        });
+        }
+
+        io.to(challengerId).emit("round2:challengeAccepted", { eliteId, matchId });
+        io.to(eliteId).emit("round2:challengeAccepted", { challengerId, matchId });
+
+        return callback?.({ success: true, message: "Challenge accepted.", matchId });
+      }catch(err){
+        console.error("Error in handleChallengeAccepted", err);
+        callback?.({ success: false, message: "Server error" });
+      }
+    }
+
+    const handleChallengeReject = async(payload,callback)=>{
+      try{
+        const eliteId=socket.user.id;
+        const {challengerId}=payload;
+
+        const requestKey=`round2:request:${challengerId}:${eliteId}`;
+        const requestData = await redis.get(requestKey);
+        if(!requestData)
+        {
+          return callback?.({success:false,message:"No active request found."});
+        }
+
+        await redis.multi()
+        .zrem(`round2:pending:${eliteId}`, challengerId)
+        .srem(`round2:outgoing:${challengerId}`, eliteId)
+        .del(requestKey)
+        .exec();
+
+        io.to(challengerId).emit("round2:challengeRejected", { eliteId });
+        return callback?.({ success: true, message: "Challenge rejected." });
+
+      }catch(err){
+        console.error("Error in handleChallengeRejected", err);
+        return callback?.({ success: false, message: "Server error" });
+      }
+    }
+
     //socket events
     socket.on("client:sendMessage", handleClientMessage); 
 
@@ -221,6 +365,9 @@ export const round2Handler = (io, socket) => {
     socket.on("bounty:questionStart",handleBountyBeginQuestion);
     
     //elite vs challenger sockets
+    socket.on("round2:challengeRequest",handleChallengeRequest);
+    socket.on("round2:challengeReject",handleChallengeReject);
+    socket.on("round2:challengeAccept",handleChallengeAccept);
    
   };
   
