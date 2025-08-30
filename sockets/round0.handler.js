@@ -1,13 +1,9 @@
-import { Server } from "socket.io";
-import { createServer } from "http";
-import express from "express";
+
 import redis from "../config/redis.js";
 import {prisma} from "../config/database.js"
-import { io } from "./socket.js"
-import { verifySocketToken } from "../middleware/authMiddleware.js";
+
 // round0_handler.js
 
-import { GetProblems } from '../controller/matchController.js';
 const REDIS_KEY = 'round0';
 export const round0Handler = (io, socket) => {
   // Handle generic client message
@@ -25,7 +21,7 @@ export const round0Handler = (io, socket) => {
       }
     };
   
-    socket.on("client:sendMessage", handleClientMessage);
+
 
   //fetch for round 0
   const fetchProblem = async (payload, callback) => {
@@ -69,7 +65,7 @@ export const round0Handler = (io, socket) => {
     }
   };
 
-  socket.on('fetchProblem', fetchProblem);
+  
   
 
   // Join lobby 
@@ -139,8 +135,8 @@ export const round0Handler = (io, socket) => {
   };
 
   // Register socket event listeners
-  socket.on('round0:join', joinLobby);
-  socket.on('round0:leave', leaveLobby);
+  
+  
 
   const lobby = async() => {
     const allParticipantsRaw = await redis.hgetall(REDIS_KEY);
@@ -151,7 +147,7 @@ export const round0Handler = (io, socket) => {
     io.emit('lobby', lobbyParticipants);
   
   }
-  socket.on('lobby',lobby);
+  
 
   const nextProblem = async(_,callback) =>{ 
     const userId = socket.user?.id;     
@@ -176,7 +172,7 @@ export const round0Handler = (io, socket) => {
 }
 
 
-  socket.on('nextProblem', nextProblem);
+  
 
 const reconnectRound0 = async (payload, callback) => {
     try {
@@ -219,7 +215,7 @@ const reconnectRound0 = async (payload, callback) => {
   };
 
   // Reconnect event listener
-  socket.on('round0:reconnect', reconnectRound0);
+  
   
   const round_duration = 1800;   //this is in seconds not in milliseconds unlike date.now
   let roundStartTime = null;
@@ -244,7 +240,7 @@ const reconnectRound0 = async (payload, callback) => {
     }, 1000);       //Set Interval to 1000 milliseconds
   };
 
-    socket.on('round0:start', startTimer);
+    
   const disconnect_handler = async () => {
     try {
       const userId = socket.user?.id;
@@ -285,7 +281,7 @@ const reconnectRound0 = async (payload, callback) => {
     }
   }
 
-  socket.on('disconnect', disconnect_handler);
+  
 
   const start_round0 = async() =>{
     const problems = await prisma.problem.findMany({
@@ -296,8 +292,19 @@ const reconnectRound0 = async (payload, callback) => {
   });
     io.emit('start_round0', {problems, round0_duation : 1800});
   }
-    socket.on('start_round0', start_round0);
+    
 
+
+    socket.on("client:sendMessage", handleClientMessage);
+    socket.on('fetchProblem', fetchProblem);
+    socket.on('round0:join', joinLobby);
+    socket.on('round0:leave', leaveLobby);
+    socket.on('lobby',lobby);
+    socket.on('nextProblem', nextProblem);
+    socket.on('round0:reconnect', reconnectRound0);
+    socket.on('round0:start', startTimer);
+    socket.on('disconnect', disconnect_handler);
+    socket.on('start_round0', start_round0);
 };
 
 
