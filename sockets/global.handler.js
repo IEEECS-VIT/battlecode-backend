@@ -1,18 +1,224 @@
+import prisma from "../config/prisma.js";
+
 export const globalHandler = (io, socket) => {
-    const handleClientMessage = (payload, callback) => {
-      console.log(
-        `Message from client ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
-      );
+  console.log(` Global handler initialized for user: ${socket.user.id}`);
   
-      socket.emit("server:messageReceived", {
-        confirmation: `We received your message: "${payload.message}"`,
+  // Handle user joining - ensure they're in the leaderboard
+  const handleUserJoin = async (payload, callback) => {
+    console.log(`handleUserJoin called for user: ${socket.user.id}`);
+    try {
+      const userId = socket.user.id;
+      
+      // Check if user exists and update their last activity
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          eventScore: true,
+          currentRound: true,
+          role: true
+        }
       });
-  
-      if (callback) {
-        callback({ success: true, status: "Message handled by server." });
+
+      if (!user) {
+        if (callback) {
+          callback({ success: false, error: "User not found" });
+        }
+        return;
       }
-    };
-  
-    socket.on("client:sendMessage", handleClientMessage);
+
+      await broadcastLeaderboard(io);
+    
+      const currentRound = await getCurrentRound();
+      console.log(` Sending current round data to user:`, currentRound);
+      socket.emit("server:currentRound", currentRound);
+
+      console.log(`User ${user.username || user.name} joined the global socket`);
+      
+      if (callback) {
+        callback({ 
+          success: true, 
+          user: {
+            id: user.id,
+            name: user.name,
+            username: user.username,
+            eventScore: user.eventScore,
+            currentRound: user.currentRound
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Error handling user join:", error);
+      if (callback) {
+        callback({ success: false, error: "Internal server error" });
+      }
+    }
   };
+
+  // Handle leaderboard request
+  const handleLeaderboardRequest = async (payload, callback) => {
+    console.log(`handleLeaderboardRequest called for user: ${socket.user.id}`);
+    try {
+      const leaderboard = await getLeaderboard();
+      
+      console.log(`Sending leaderboard data:`, leaderboard);
+      socket.emit("server:leaderboard", { leaderboard });
+      
+      if (callback) {
+        callback({ success: true, leaderboard });
+      }
+    } catch (error) {
+      console.error("Error fetching leaderboard:", error);
+      if (callback) {
+        callback({ success: false, error: "Failed to fetch leaderboard" });
+      }
+    }
+  };
+
+  // Handle current round request
+  const handleCurrentRoundRequest = async (payload, callback) => {
+    console.log(`handleCurrentRoundRequest called for user: ${socket.user.id}`);
+    try {
+      const currentRound = await getCurrentRound();
+      
+      console.log(`Sending current round data:`, currentRound);
+      socket.emit("server:currentRound", currentRound);
+      
+      if (callback) {
+        callback({ success: true, currentRound });
+      }
+    } catch (error) {
+      console.error("Error fetching current round:", error);
+      if (callback) {
+        callback({ success: false, error: "Failed to fetch current round" });
+      }
+    }
+  };
+
+  const handleClientMessage = (payload, callback) => {
+    console.log(
+      `Message from client ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
+    );
+
+    socket.emit("server:messageReceived", {
+      confirmation: `We received your message: "${payload.message}"`,
+    });
+
+    if (callback) {
+      callback({ success: true, status: "Message handled by server." });
+    }
+  };
+
+  // Socket event listeners
+  console.log(` Setting up socket event listeners for user: ${socket.user.id}`);
+  socket.on("client:join", handleUserJoin);
+  socket.on("client:getLeaderboard", handleLeaderboardRequest);
+  socket.on("client:getCurrentRound", handleCurrentRoundRequest);
+  socket.on("client:sendMessage", handleClientMessage);
+
+  // Auto-join user when they connect
+  console.log(` Auto-joining user: ${socket.user.id}`);
+  handleUserJoin({}, null);
+};
+
+// Helper function to get current round
+const getCurrentRound = async () => {
+  try {
+    // Get all rounds with their status
+    const rounds = await prisma.round.findMany({
+      orderBy: { roundNumber: 'asc' },
+      select: {
+        roundNumber: true,
+        status: true
+      }
+    });
+
+    // Find the current active round (IN_PROGRESS) or the next upcoming round (LOBBY)
+    let currentRound = rounds.find(r => r.status === 'IN_PROGRESS');
+    
+    if (!currentRound) {
+      // If no round is in progress, find the next round in lobby state
+      currentRound = rounds.find(r => r.status === 'LOBBY');
+    }
+    
+    if (!currentRound) {
+    
+      currentRound = rounds.find(r => r.status === 'LOCKED');
+    }
+
+    const roundStatuses = rounds.map(round => ({
+      roundNumber: round.roundNumber,
+      status: round.status,
+      isActive: round.status === 'IN_PROGRESS',
+      isLocked: round.status === 'LOCKED'
+    }));
+
+    return {
+      currentRoundNumber: currentRound?.roundNumber || 0,
+      currentRoundStatus: currentRound?.status || 'LOCKED',
+      rounds: roundStatuses
+    };
+  } catch (error) {
+    console.error("Error getting current round:", error);
+    return {
+      currentRoundNumber: 0,
+      currentRoundStatus: 'LOCKED',
+      rounds: []
+    };
+  }
+};
+
+
+const getLeaderboard = async () => {
+  try {
+    const users = await prisma.user.findMany({
+      where: {
+       
+        role: { in: ['PLAYER', 'ADMIN'] }
+      },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        eventScore: true,
+        currentRound: true,
+        regNo: true
+      },
+      orderBy: [
+        { eventScore: 'desc' },
+        { name: 'asc' } 
+      ]
+    });
+
+    const leaderboard = users.map((user, index) => ({
+      rank: index + 1,
+      id: user.id,
+      name: user.name,
+      username: user.username || 'Not Set',
+      score: user.eventScore,
+      currentRound: user.currentRound,
+      regNo: user.regNo,
+      trend: '' 
+    }));
+
+    return leaderboard;
+  } catch (error) {
+    console.error("Error getting leaderboard:", error);
+    return [];
+  }
+};
+
+
+const broadcastLeaderboard = async (io) => {
+  try {
+    const leaderboard = await getLeaderboard();
+    io.emit("server:leaderboard", { leaderboard });
+  } catch (error) {
+    console.error("Error broadcasting leaderboard:", error);
+  }
+};
+
+export { getCurrentRound, getLeaderboard, broadcastLeaderboard };
   

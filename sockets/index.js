@@ -6,11 +6,30 @@ import { round1Handler } from "./round1.handler.js";
 import { round2Handler } from "./round2.handler.js";
 import { round3Handler } from "./round3.handler.js";
 import { adminHandler } from "./admin.handler.js";
-import { globalHandler } from "./global.handler.js";
-
+import { globalHandler, broadcastLeaderboard, getLeaderboard } from "./global.handler.js";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Store the previous leaderboard to detect changes
+let previousLeaderboardHash = null;
+
+// Function to check for leaderboard changes and broadcast if needed
+const checkAndBroadcastLeaderboard = async (io) => {
+  try {
+    const currentLeaderboard = await getLeaderboard();
+    const currentHash = JSON.stringify(currentLeaderboard);
+    
+    // Only broadcast if there are changes
+    if (currentHash !== previousLeaderboardHash) {
+      console.log("Leaderboard changes detected, broadcasting update...");
+      await broadcastLeaderboard(io);
+      previousLeaderboardHash = currentHash;
+    }
+  } catch (error) {
+    console.error("Error checking leaderboard changes:", error);
+  }
+};
 
 export default function initializeSocket(io) {
   io.use(async (socket, next) => {
@@ -57,4 +76,22 @@ export default function initializeSocket(io) {
   };
 
   io.on("connection", onConnection);
+
+  // Set up automatic leaderboard broadcasting every 2 minutes
+  const leaderboardInterval = setInterval(() => {
+    checkAndBroadcastLeaderboard(io);
+  }, 2 * 60 * 1000); // 2 minutes in milliseconds
+
+  console.log("Socket server initialized with automatic leaderboard broadcasting every 2 minutes");
+
+  // Clean up interval when server shuts down
+  process.on('SIGINT', () => {
+    clearInterval(leaderboardInterval);
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    clearInterval(leaderboardInterval);
+    process.exit(0);
+  });
 }
