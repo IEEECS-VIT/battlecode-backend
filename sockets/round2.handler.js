@@ -1,5 +1,5 @@
-import redis from "../config/redis";
-import {prisma} from "../config/prisma";
+import redis from "../config/redis.js";
+import prisma from "../config/prisma.js";
 
 const LEVEL_TIME_LIMIT_MS = {
   easy: 10 * 60 * 1000,

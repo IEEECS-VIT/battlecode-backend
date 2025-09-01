@@ -1,25 +1,11 @@
 
 import redis from "../config/redis.js";
-import {prisma} from "../config/database.js"
+import prisma from "../config/prisma.js"
 
 // round0_handler.js
 
 const REDIS_KEY = 'round0';
 export const round0Handler = (io, socket) => {
-  // Handle generic client message
-  const handleClientMessage = (payload, callback) => {
-      console.log(
-        `Message from client ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
-      );
-  
-      socket.emit("server:messageReceived", {
-        confirmation: `We received your message: "${payload.message}"`,
-      });
-  
-      if (callback) {
-        callback({ success: true, status: "Message handled by server." });
-      }
-    };
   
 
 
@@ -295,7 +281,6 @@ const reconnectRound0 = async (payload, callback) => {
     
 
 
-    socket.on("client:sendMessage", handleClientMessage);
     socket.on('fetchProblem', fetchProblem);
     socket.on('round0:join', joinLobby);
     socket.on('round0:leave', leaveLobby);
