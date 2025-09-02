@@ -4,8 +4,6 @@ import express from "express";
 import redis from "../config/redis.js";
 import { verifySocketToken } from "../middleware/authMiddleware.js";
 import { GetProblems } from "../controller/matchController.js";
-import { handleRound1Join, handleRound1Ready } from "./round1.handler.js";
-import { use } from "react";
 
 const app = express();
 const httpServer = createServer(app);
@@ -82,54 +80,6 @@ export default function initializeSocket(io) {
 
   io.on("connection", (socket) => {
     console.log(`User connected: ${socket.user.id} (Socket: ${socket.id})`);
-
-    handleRound1Join(socket);
-    handleRound1Ready(socket);
-
-    socket.on("round1:join", async({userId}) => {
-      try{
-        await prisma.user.update({  //updating the current round of the user to 1
-          where: { id: userId },
-        data: { currentRound: 1 }
-        });
-
-        await redis.sadd("round1:lobby", userId);
-
-        const participants = await redis.smembers("round1:lobby");
-        io.emit("lobby:round1", {participants});
-      }catch(error){
-        console.error("JOining error:", error);
-
-      }
-    })
-
-    socket.on("round1:ready", async({ adminId }) => {
-      try {
-        const admin = await prisma.user.findUnique({
-          where: { id: adminId },
-        });
-        if (admin.role !== "ADMIN") return; 
-
-        const endTime  = Date.now() + 90 * 60 *1000; // the 90 min thing
-
-        await redis.set("round1:timer", endTime);
-
-        for ( let userId of participants){
-          await redis.zadd("round1:readyQueue", 0, userId); // ranking should be based on score ( i'll do that in a bit)
-        }
-
-        await redis.del("round1:lobby");
-
-        setInterval(() => {
-        runMatchmaking();
-      }, 5000);
-
-      }
-      catch(error){
-        console.error("Ready error  :", error);
-
-      }
-    })
 
     // Enhanced join room handler with callback
     socket.on("joinRoom", ({ matchId }, callback) => {
