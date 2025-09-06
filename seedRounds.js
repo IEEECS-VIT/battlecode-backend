@@ -6,7 +6,7 @@ async function seedRounds() {
 
     // Create or upsert the 4 rounds
     const rounds = [
-      { roundNumber: 0, status: 'IN_PROGRESS' }, // Qualifier - currently active for testing
+      { roundNumber: 0, status: 'LOCKED' },     // Qualifier - locked initially
       { roundNumber: 1, status: 'LOCKED' },     // Head to Head
       { roundNumber: 2, status: 'LOCKED' },     // Elite Bounties  
       { roundNumber: 3, status: 'LOCKED' }      // The Final Hack

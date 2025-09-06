@@ -123,9 +123,13 @@ enum Role {
 }
 
 enum Difficulty {
-  EASY
-  MEDIUM
-  HARD
+  R0
+  R1_EASY
+  R1_MEDIUM
+  R1_HARD
+  R2_BOUNTY
+  R2_CHALLENGE
+  R3
 }
 
 enum RoundStatus {

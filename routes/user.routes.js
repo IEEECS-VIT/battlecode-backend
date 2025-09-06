@@ -25,7 +25,17 @@ router.post("/verify", verifyAuthToken, async (req, res) => {
 
     const hasUsername = !!user.username;
 
-    res.status(200).json({ ok: true, hasUsername });
+    res.status(200).json({ 
+      ok: true, 
+      hasUsername,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        createdAt: user.createdAt
+      }
+    });
   } catch (error) {
     console.error("Error in /verifyToken:", error);
     res.status(500).json({ error: "Internal server error" });
