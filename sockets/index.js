@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import express from "express";
 import { verifySocketToken } from "../middleware/authMiddleware.js";
-import { round0Handler } from "./round0.handler.js";
+import { round0Handler } from "./round0.handler.js";  
 import { round1Handler } from "./round1.handler.js";
 import { round2Handler } from "./round2.handler.js";
 import { round3Handler } from "./round3.handler.js";
@@ -28,6 +28,7 @@ const checkAndBroadcastLeaderboard = async (io) => {
     }
   } catch (error) {
     console.error("Error checking leaderboard changes:", error);
+    // Don't throw error to prevent interval from stopping
   }
 };
 
@@ -77,12 +78,12 @@ export default function initializeSocket(io) {
 
   io.on("connection", onConnection);
 
-  // Set up automatic leaderboard broadcasting every 2 minutes
+  // Set up automatic leaderboard broadcasting every 5 minutes (reduced frequency)
   const leaderboardInterval = setInterval(() => {
     checkAndBroadcastLeaderboard(io);
-  }, 2 * 60 * 1000); // 2 minutes in milliseconds
+  }, 5 * 60 * 1000); // 5 minutes in milliseconds
 
-  console.log("Socket server initialized with automatic leaderboard broadcasting every 2 minutes");
+  console.log("Socket server initialized with automatic leaderboard broadcasting every 5 minutes");
 
   // Clean up interval when server shuts down
   process.on('SIGINT', () => {

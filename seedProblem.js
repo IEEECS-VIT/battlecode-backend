@@ -104,6 +104,99 @@ async function main() {
     },
   });
   console.log(`Successfully seeded problem: "${problemTitle}"`);
+
+  // Seed additional problems for Round 0 testing
+  const additionalProblems = [
+    {
+      title: "Reverse String",
+      description: "Write a function that reverses a string. The input string is given as an array of characters `s`.\n\nYou must do this by modifying the input array in-place with O(1) extra memory.",
+      difficulty: 'R0',
+      constraints: [
+        "1 <= s.length <= 10^5",
+        "s[i] is a printable ascii character."
+      ],
+      hints: [
+        "Use two pointers approach",
+        "Swap characters from both ends moving towards center"
+      ],
+      boilerplate: {
+        python: "import sys\n\nclass Solution:\n    def reverseString(self, s: list[str]) -> None:\n        # Your code here - modify s in-place\n        pass\n\nif __name__ == \"__main__\":\n    solver = Solution()\n    \n    s_line = sys.stdin.readline().strip()\n    s = list(s_line)\n    \n    solver.reverseString(s)\n    \n    print(''.join(s))"
+      },
+      sampleTestCases: [
+        {
+          stdin: "hello",
+          expected_output: "olleh"
+        },
+        {
+          stdin: "Hannah",
+          expected_output: "hannaH"
+        }
+      ],
+      hiddenTestCases: [
+        {
+          stdin: "racecar",
+          expected_output: "racecar"
+        }
+      ]
+    },
+    {
+      title: "Palindrome Number", 
+      description: "Given an integer `x`, return `true` if `x` is a palindrome, and `false` otherwise.",
+      difficulty: 'R0',
+      constraints: [
+        "-2^31 <= x <= 2^31 - 1"
+      ],
+      hints: [
+        "Negative numbers are not palindromes",
+        "Could you solve it without converting the integer to a string?"
+      ],
+      boilerplate: {
+        python: "import sys\n\nclass Solution:\n    def isPalindrome(self, x: int) -> bool:\n        # Your code here\n        pass\n\nif __name__ == \"__main__\":\n    solver = Solution()\n    \n    x = int(sys.stdin.readline().strip())\n    \n    result = solver.isPalindrome(x)\n    \n    print('true' if result else 'false')"
+      },
+      sampleTestCases: [
+        {
+          stdin: "121",
+          expected_output: "true"
+        },
+        {
+          stdin: "-121",
+          expected_output: "false"
+        },
+        {
+          stdin: "10",
+          expected_output: "false"
+        }
+      ],
+      hiddenTestCases: [
+        {
+          stdin: "12321",
+          expected_output: "true"
+        }
+      ]
+    }
+  ];
+
+  // Seed additional problems
+  for (const problemData of additionalProblems) {
+    await prisma.problem.upsert({
+      where: { title: problemData.title },
+      update: {
+        ...problemData,
+        roundId: round.roundNumber,
+        categories: {
+          set: categoryIds,
+        },
+      },
+      create: {
+        ...problemData,
+        roundId: round.roundNumber,
+        categories: {
+          connect: categoryIds,
+        },
+      },
+    });
+    console.log(`Successfully seeded problem: "${problemData.title}"`);
+  }
 }
 
 main()

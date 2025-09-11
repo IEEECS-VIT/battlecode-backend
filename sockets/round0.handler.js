@@ -28,7 +28,7 @@ import prisma from "../config/prisma.js";
  * - round0:user:{userId} - User presence
  */
 
-const ROUND_DURATION = 60;
+const ROUND_DURATION = 60*20;
 const ROUND_NUMBER = 0;
 
 let globalRoundState = {
@@ -104,14 +104,24 @@ export const round0Handler = (io, socket) => {
     return { userId, email };
   };
 
-  const executeAtomicRedisOperation = async (operations) => {
-    const pipeline = redis.pipeline();
-    operations(pipeline);
-    return await pipeline.exec();
-  };
-
   const broadcastLobbyUpdate = async () => {
     try {
+      // Check database status to ensure consistency
+      const round0DB = await prisma.round.findUnique({
+        where: { roundNumber: 0 }
+      });
+
+      // Sync in-memory state with database
+      if (round0DB) {
+        const dbIsActive = round0DB.status === 'IN_PROGRESS';
+        if (dbIsActive !== globalRoundState.isActive) {
+          console.log(`Syncing in-memory state with database: DB=${round0DB.status}, Memory=${globalRoundState.isActive ? 'ACTIVE' : 'INACTIVE'}`);
+          if (!dbIsActive) {
+            initializeGlobalState();
+          }
+        }
+      }
+
       const keys = getRedisKeys();
       const allParticipantsRaw = await redis.hgetall(keys.lobby);
       const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
@@ -119,10 +129,19 @@ export const round0Handler = (io, socket) => {
         ...JSON.parse(value)
       }));
 
+      // Calculate remaining time
+      let timeRemaining = 0;
+      if (globalRoundState.isActive && globalRoundState.startTime) {
+        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      }
+
       io.to('round0').emit('lobby:round0', {
         participants: lobbyParticipants,
         totalParticipants: lobbyParticipants.length,
-        isActive: globalRoundState.isActive
+        isActive: globalRoundState.isActive,
+        timeRemaining,
+        databaseStatus: round0DB?.status || 'UNKNOWN'
       });
     } catch (error) {
       console.error('Error broadcasting lobby update:', error);
@@ -223,9 +242,26 @@ export const round0Handler = (io, socket) => {
         return callback?.({ success: false, error: 'Unauthorized - No user ID or email' });
       }
 
-      // Check if round is already active (early check)
-      if (globalRoundState.isActive) {
-        return callback?.({ success: false, error: 'Round 0 has already started' });
+      // Check round status from database first
+      const round0DB = await prisma.round.findUnique({
+        where: { roundNumber: 0 }
+      });
+
+      if (!round0DB) {
+        return callback?.({ success: false, error: 'Round 0 not found in database' });
+      }
+
+      if (round0DB.status !== 'LOBBY') {
+        return callback?.({ 
+          success: false, 
+          error: `Round 0 is not in LOBBY status. Current status: ${round0DB.status}` 
+        });
+      }
+
+      // Update in-memory state to match database
+      if (round0DB.status === 'LOBBY' && globalRoundState.isActive) {
+        console.log('Database shows LOBBY but in-memory state shows active. Resetting in-memory state.');
+        initializeGlobalState();
       }
 
       // Step 1: Fetch and validate user data from database first
@@ -299,12 +335,8 @@ export const round0Handler = (io, socket) => {
       // Step 6: Join socket room
       socket.join('round0');
 
-      // Step 7: Emit lobby update to all Round 0 participants
-      io.to('round0').emit('lobby:round0', {
-        participants: lobbyParticipants,
-        totalParticipants: lobbyParticipants.length,
-        isActive: globalRoundState.isActive
-      });
+      // Step 7: Broadcast lobby update to all participants
+      await broadcastLobbyUpdate();
 
       console.log(`User ${username} (${userId}) joined Round 0 lobby`);
       
@@ -719,27 +751,8 @@ export const round0Handler = (io, socket) => {
           globalRoundState.participants.set(userId, participant);
         }
 
-        // Get updated participants list
-        const allParticipantsRaw = await redis.hgetall(keys.lobby);
-        const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
-          userId: uid,
-          ...JSON.parse(value)
-        }));
-
-        // Calculate remaining time
-        let timeRemaining = 0;
-        if (globalRoundState.isActive && globalRoundState.startTime) {
-          const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-          timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
-        }
-
-        // Notify other participants about the disconnection
-        socket.to('round0').emit('lobby:round0', {
-          participants: lobbyParticipants,
-          totalParticipants: lobbyParticipants.length,
-          isActive: globalRoundState.isActive,
-          timeRemaining
-        });
+        // Broadcast updated lobby state
+        await broadcastLobbyUpdate();
       }
 
       // Remove user presence
@@ -828,14 +841,36 @@ export const round0Handler = (io, socket) => {
     }
     const { userId } = validation;
 
-    if (!globalRoundState.isActive) {
-      return callback?.({ 
-        success: false, 
-        error: 'Round 0 is not active' 
-      });
-    }
-
     try {
+      // Check database status first
+      const round0DB = await prisma.round.findUnique({
+        where: { roundNumber: 0 }
+      });
+
+      if (!round0DB) {
+        return callback?.({ success: false, error: 'Round 0 not found in database' });
+      }
+
+      if (round0DB.status !== 'IN_PROGRESS') {
+        return callback?.({ 
+          success: false, 
+          error: `Round 0 is not active. Database status: ${round0DB.status}` 
+        });
+      }
+
+      // Sync in-memory state with database
+      if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') {
+        console.log('Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
+        await syncGlobalStateWithRedis();
+      }
+
+      if (!globalRoundState.isActive) {
+        return callback?.({ 
+          success: false, 
+          error: 'Round 0 is not active' 
+        });
+      }
+
       const keys = getRedisKeys(userId);
       const userStateRaw = await redis.get(keys.state);
       
@@ -864,7 +899,52 @@ export const round0Handler = (io, socket) => {
       });
     } catch (error) {
       console.error('Error in round0:getState:', error);
-      callback?.({ success: false, message: 'Failed to retrieve game state' });
+      callback?.({ success: false, error: 'Failed to retrieve game state' });
+    }
+  };
+
+  // Handle round0:reset (Admin only)
+  const handleReset = async (payload, callback) => {
+    const validation = validateUser();
+    if (validation.error) {
+      return callback?.({ success: false, error: validation.error });
+    }
+    const { email } = validation;
+
+    try {
+      // Check if user is admin
+      const userData = await prisma.user.findUnique({
+        where: { email },
+        select: { role: true }
+      });
+
+      if (!userData || userData.role !== 'ADMIN') {
+        return callback?.({ success: false, error: 'Only admins can reset Round 0' });
+      }
+
+      const success = await resetRoundState();
+      
+      if (success) {
+        // Update database status back to LOBBY
+        await prisma.round.update({
+          where: { roundNumber: 0 },
+          data: { status: 'LOBBY' }
+        });
+        
+        // Notify all clients about the reset
+        io.emit('round0:reset', { message: 'Round 0 has been reset by admin' });
+        
+        console.log(`Round 0 reset by admin`);
+      }
+
+      callback?.({ 
+        success, 
+        message: success ? 'Round 0 reset successfully' : 'Failed to reset Round 0'
+      });
+
+    } catch (error) {
+      console.error('Error in round0:reset:', error);
+      callback?.({ success: false, error: 'Failed to reset Round 0' });
     }
   };
 
@@ -873,7 +953,7 @@ export const round0Handler = (io, socket) => {
   socket.on('round0:ready', handleAdminReady); 
   socket.on('round0:nextQuestion', handleNextQuestion);
   socket.on('round0:getState', handleGetState);
-  socket.on('round0:reset', resetRoundState);
+  socket.on('round0:reset', handleReset);
   socket.on('disconnect', handleDisconnect);
 
   // INITIALIZATION

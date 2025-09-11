@@ -172,41 +172,49 @@ const getCurrentRound = async () => {
 
 
 const getLeaderboard = async () => {
-  try {
-    const users = await prisma.user.findMany({
-      where: {
-       
-        role: { in: ['PLAYER', 'ADMIN'] }
-      },
-      select: {
-        id: true,
-        name: true,
-        username: true,
-        eventScore: true,
-        currentRound: true,
-        regNo: true
-      },
-      orderBy: [
-        { eventScore: 'desc' },
-        { name: 'asc' } 
-      ]
-    });
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const users = await prisma.user.findMany({
+        where: {
+          role: { in: ['PLAYER', 'ADMIN'] }
+        },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          eventScore: true,
+          currentRound: true,
+          regNo: true
+        },
+        orderBy: [
+          { eventScore: 'desc' },
+          { name: 'asc' } 
+        ]
+      });
 
-    const leaderboard = users.map((user, index) => ({
-      rank: index + 1,
-      id: user.id,
-      name: user.name,
-      username: user.username || 'Not Set',
-      score: user.eventScore,
-      currentRound: user.currentRound,
-      regNo: user.regNo,
-      trend: '' 
-    }));
+      const leaderboard = users.map((user, index) => ({
+        rank: index + 1,
+        id: user.id,
+        name: user.name,
+        username: user.username || 'Not Set',
+        score: user.eventScore,
+        currentRound: user.currentRound,
+        regNo: user.regNo,
+        trend: '' 
+      }));
 
-    return leaderboard;
-  } catch (error) {
-    console.error("Error getting leaderboard:", error);
-    return [];
+      return leaderboard;
+    } catch (error) {
+      console.error(`Error getting leaderboard (retries left: ${retries - 1}):`, error.message);
+      retries--;
+      if (retries === 0) {
+        console.error("Failed to get leaderboard after 3 retries");
+        return [];
+      }
+      // Wait 1 second before retry
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
 };
 
@@ -214,7 +222,10 @@ const getLeaderboard = async () => {
 const broadcastLeaderboard = async (io) => {
   try {
     const leaderboard = await getLeaderboard();
-    io.emit("server:leaderboard", { leaderboard });
+    if (leaderboard.length > 0) {
+      io.emit("server:leaderboard", { leaderboard });
+      console.log(`Broadcasted leaderboard to ${io.engine.clientsCount} clients`);
+    }
   } catch (error) {
     console.error("Error broadcasting leaderboard:", error);
   }

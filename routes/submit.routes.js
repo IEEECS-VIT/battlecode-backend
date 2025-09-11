@@ -1,37 +1,40 @@
 import express from "express";
 import axios from "axios";
 import http from 'http';
+import prisma from "../config/prisma.js";
+import { calculateScore } from "../utils/calculateScore.js";
+import verifyAuthToken from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Judge0 API configuration
-const JUDGE0_API_URL = process.env.JUDGE0_API_URL
-const JUDGE0_API_KEY = null; // Add if using RapidAPI hosted version
+const JUDGE0_API_URL = process.env.JUDGE0_API_URL;
+const JUDGE0_API_KEY = null;
 
-// Language ID mapping
 const LANGUAGE_ID_MAP = {
   cpp: 54,
   python: 71,
-  javascript: 63,
   java: 62,
   c: 50,
 };
 
-// Helper function to delay execution
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * POST /execute
- * Submits code to Judge0 for execution and returns the result
+ * POST /run
+ * Test code against sample test cases only (no database changes)
  */
-router.post("/execute", async (req, res) => {
+router.post("/run", async (req, res) => {
   try {
-    const { language, source_code, stdin, expected_output } = req.body;
+    const { language, source_code, problemId } = req.body;
+    // const userId = req.user?.id;
 
-    // Validate required fields
-    if (!language || !source_code) {
+    // if (!userId) {
+    //   return res.status(401).json({ error: "Unauthorized" });
+    // }
+
+    if (!language || !source_code || !problemId) {
       return res.status(400).json({
-        error: "Missing required fields: language and source_code",
+        error: "Missing required fields: language, source_code, problemId",
       });
     }
 
@@ -40,122 +43,39 @@ router.post("/execute", async (req, res) => {
       return res.status(400).json({ error: `Unsupported language: ${language}` });
     }
 
-    // Create HTTP agent to prevent SSL issues
-    const httpAgent = new http.Agent();
-    const axiosConfig = {
-      httpAgent,
-      headers: JUDGE0_API_KEY 
-        ? { "X-RapidAPI-Key": JUDGE0_API_KEY }
-        : {}
-    };
-
-    // 1. Submit the code to Judge0
-    const submissionResponse = await axios.post(
-      `${JUDGE0_API_URL}/submissions`,
-      {
-        language_id,
-        source_code,
-        stdin: stdin || "",
-        expected_output: expected_output || "",
-        wait: false // We'll poll for results
-      },
-      axiosConfig
-    );
-
-    const token = submissionResponse.data.token;
-
-    // 2. Poll for the result (with timeout)
-    const startTime = Date.now();
-    const timeout = 10000; // 10 seconds timeout
-    let result;
-
-    while (Date.now() - startTime < timeout) {
-      const resultResponse = await axios.get(
-        `${JUDGE0_API_URL}/submissions/${token}`,
-        axiosConfig
-      );
-
-      const statusId = resultResponse.data.status?.id;
-
-      // Status IDs:
-      // 1: In Queue, 2: Processing, 3: Accepted
-      // Other statuses mean we're done
-      if (statusId === 1 || statusId === 2) {
-        await sleep(1000); // Wait 1 second before polling again
-      } else {
-        result = resultResponse.data;
-        break;
-      }
-    }
-
-    if (!result) {
-      return res.status(408).json({ error: "Execution timed out" });
-    }
-
-    // 3. Format the response
-    const response = {
-      status: {
-        id: result.status.id,
-        description: result.status.description,
-      },
-      stdout: result.stdout,
-      stderr: result.stderr,
-      compile_output: result.compile_output,
-      time: result.time,
-      memory: result.memory,
-      exit_code: result.exit_code,
-      exit_signal: result.exit_signal,
-    };
-
-    res.status(200).json(response);
-  } catch (error) {
-    console.error("Judge0 execution error:", error.message);
-    res.status(500).json({
-      error: "Failed to execute code",
-      details: error.response?.data || error.message
+    // Get problem and sample test cases
+    const problem = await prisma.problem.findUnique({
+      where: { id: problemId },
+      select: { sampleTestCases: true, title: true }
     });
-  }
-});
 
-/**
- * POST /execute-batch
- * Submits multiple test cases as a batch to Judge0
- */
-router.post("/execute-batch", async (req, res) => {
-  try {
-    const { language, source_code, test_cases } = req.body;
-
-    // Validate required fields
-    if (!language || !source_code || !test_cases || !Array.isArray(test_cases)) {
-      return res.status(400).json({
-        error: "Missing required fields: language, source_code, or test_cases",
-      });
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
     }
 
-    const language_id = LANGUAGE_ID_MAP[language.toLowerCase()];
-    if (!language_id) {
-      return res.status(400).json({ error: `Unsupported language: ${language}` });
+    const sampleTestCases = Array.isArray(problem.sampleTestCases) 
+      ? problem.sampleTestCases 
+      : problem.sampleTestCases.testCases || [];
+
+    if (sampleTestCases.length === 0) {
+      return res.status(400).json({ error: "No sample test cases found" });
     }
 
-    // Create HTTP agent to prevent SSL issues
     const httpAgent = new http.Agent();
     const axiosConfig = {
       httpAgent,
-      headers: JUDGE0_API_KEY 
-        ? { "X-RapidAPI-Key": JUDGE0_API_KEY }
-        : {}
+      headers: JUDGE0_API_KEY ? { "X-RapidAPI-Key": JUDGE0_API_KEY } : {}
     };
 
-    // Prepare submissions
-    const submissions = test_cases.map((testCase, index) => ({
+    // Prepare submissions for sample test cases only
+    const submissions = sampleTestCases.map((testCase) => ({
       language_id,
       source_code,
-      stdin: testCase.stdin || "",
-      expected_output: testCase.expected_output || "",
-      callback_url: testCase.callback_url || null,
+      stdin: testCase.stdin || testCase.input || "",
+      expected_output: testCase.expected_output || testCase.output || "",
     }));
 
-    // Submit batch
+    // Submit batch to Judge0
     const submissionResponse = await axios.post(
       `${JUDGE0_API_URL}/submissions/batch`,
       { submissions },
@@ -163,19 +83,16 @@ router.post("/execute-batch", async (req, res) => {
     );
 
     const tokens = submissionResponse.data.map(item => item.token);
-
-    // Poll for results
     const results = [];
     const startTime = Date.now();
-    const timeout = 15000; // 15 seconds timeout
+    const timeout = 15000;
 
+    // Poll for results
     while (results.length < tokens.length && Date.now() - startTime < timeout) {
-      // Get all pending tokens (those not in results yet)
       const pendingTokens = tokens.filter(
         token => !results.some(r => r.token === token)
       );
 
-      // Get statuses for pending tokens
       const statusResponses = await Promise.all(
         pendingTokens.map(token => 
           axios.get(`${JUDGE0_API_URL}/submissions/${token}`, axiosConfig)
@@ -183,20 +100,16 @@ router.post("/execute-batch", async (req, res) => {
         )
       );
 
-      // Process responses
       for (const response of statusResponses) {
         const data = response.data;
         
-        // Skip if already in results
         if (results.some(r => r.token === data.token)) continue;
 
         const statusId = data.status?.id;
 
         if (statusId === 1 || statusId === 2) {
-          // Still processing, leave in queue
           continue;
         } else {
-          // Done processing, add to results
           results.push({
             token: data.token,
             status: data.status,
@@ -205,33 +118,270 @@ router.post("/execute-batch", async (req, res) => {
             compile_output: data.compile_output,
             time: data.time,
             memory: data.memory,
+            passed: data.status?.id === 3
           });
         }
       }
 
-      // If we have all results, break early
       if (results.length === tokens.length) break;
-
-      // Otherwise wait before polling again
       await sleep(1000);
     }
 
-    // Check for timeout
     if (results.length < tokens.length) {
-      return res.status(408).json({
-        error: "Batch execution timed out",
-        completed: results,
-        pending: tokens.filter(
-          token => !results.some(r => r.token === token)
-        ),
+      return res.status(408).json({ error: "Execution timed out" });
+    }
+
+    // Calculate passed test cases
+    const passedCount = results.filter(r => r.passed).length;
+    const totalCount = sampleTestCases.length;
+
+    res.status(200).json({
+      success: true,
+      results,
+      summary: {
+        passed: passedCount,
+        total: totalCount,
+        percentage: Math.round((passedCount / totalCount) * 100)
+      }
+    });
+
+  } catch (error) {
+    console.error("Run execution error:", error.message);
+    res.status(500).json({
+      error: "Failed to execute code",
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+/**
+ * POST /submit
+ * Submit code against all test cases with database updates and scoring
+ */
+router.post("/submit", verifyAuthToken, async (req, res) => {
+  try {
+    const { language, source_code, problemId, roundNumber } = req.body;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    if (!language || !source_code || !problemId || roundNumber === undefined) {
+      return res.status(400).json({
+        error: "Missing required fields: language, source_code, problemId, roundNumber",
       });
     }
 
-    res.status(200).json({ results });
+    const language_id = LANGUAGE_ID_MAP[language.toLowerCase()];
+    if (!language_id) {
+      return res.status(400).json({ error: `Unsupported language: ${language}` });
+    }
+
+    // Get problem with both sample and hidden test cases
+    const problem = await prisma.problem.findUnique({
+      where: { id: problemId },
+      select: { 
+        sampleTestCases: true, 
+        hiddenTestCases: true, 
+        title: true,
+        roundId: true
+      }
+    });
+
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    if (problem.roundId !== roundNumber) {
+      return res.status(400).json({ error: "Problem does not belong to specified round" });
+    }
+
+    const sampleTestCases = Array.isArray(problem.sampleTestCases) 
+      ? problem.sampleTestCases 
+      : problem.sampleTestCases.testCases || [];
+      
+    const hiddenTestCases = Array.isArray(problem.hiddenTestCases) 
+      ? problem.hiddenTestCases 
+      : problem.hiddenTestCases.testCases || [];
+
+    const allTestCases = [...sampleTestCases, ...hiddenTestCases];
+
+    if (allTestCases.length === 0) {
+      return res.status(400).json({ error: "No test cases found" });
+    }
+
+    const httpAgent = new http.Agent();
+    const axiosConfig = {
+      httpAgent,
+      headers: JUDGE0_API_KEY ? { "X-RapidAPI-Key": JUDGE0_API_KEY } : {}
+    };
+
+    // Prepare submissions for all test cases
+    const submissions = allTestCases.map((testCase) => ({
+      language_id,
+      source_code,
+      stdin: testCase.stdin || testCase.input || "",
+      expected_output: testCase.expected_output || testCase.output || "",
+    }));
+
+    // Submit batch to Judge0
+    const submissionResponse = await axios.post(
+      `${JUDGE0_API_URL}/submissions/batch`,
+      { submissions },
+      axiosConfig
+    );
+
+    const tokens = submissionResponse.data.map(item => item.token);
+    const results = [];
+    const startTime = Date.now();
+    const timeout = 20000; // Longer timeout for full submission
+
+    // Poll for results
+    while (results.length < tokens.length && Date.now() - startTime < timeout) {
+      const pendingTokens = tokens.filter(
+        token => !results.some(r => r.token === token)
+      );
+
+      const statusResponses = await Promise.all(
+        pendingTokens.map(token => 
+          axios.get(`${JUDGE0_API_URL}/submissions/${token}`, axiosConfig)
+            .catch(err => ({ data: { token, error: err.message } }))
+        )
+      );
+
+      for (const response of statusResponses) {
+        const data = response.data;
+        
+        if (results.some(r => r.token === data.token)) continue;
+
+        const statusId = data.status?.id;
+
+        if (statusId === 1 || statusId === 2) {
+          continue;
+        } else {
+          results.push({
+            token: data.token,
+            status: data.status,
+            stdout: data.stdout,
+            stderr: data.stderr,
+            compile_output: data.compile_output,
+            time: data.time,
+            memory: data.memory,
+            passed: data.status?.id === 3
+          });
+        }
+      }
+
+      if (results.length === tokens.length) break;
+      await sleep(1000);
+    }
+
+    if (results.length < tokens.length) {
+      return res.status(408).json({ error: "Submission execution timed out" });
+    }
+
+    // Calculate results
+    const passedCount = results.filter(r => r.passed).length;
+    const totalCount = allTestCases.length;
+    const hasAnyPass = passedCount > 0;
+
+    // Determine submission status
+    let submissionStatus;
+    if (results.some(r => r.compile_output)) {
+      submissionStatus = 'COMPILATION_ERROR';
+    } else if (results.some(r => r.stderr)) {
+      submissionStatus = 'RUNTIME_ERROR';
+    } else if (results.some(r => r.time > 2.0)) { // 2 second time limit
+      submissionStatus = 'TIME_LIMIT_EXCEEDED';
+    } else if (passedCount === totalCount) {
+      submissionStatus = 'ACCEPTED';
+    } else {
+      submissionStatus = 'WRONG_ANSWER';
+    }
+
+    // Only create submission if at least one test case passes
+    if (hasAnyPass) {
+      // Calculate score (black box returns 5 for now)
+      const currentScore = calculateScore() || 5;
+
+      // Get user's current score
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { eventScore: true }
+      });
+
+      // Update score only if it has increased
+      const newScore = Math.max(user.eventScore, currentScore);
+
+      // Delete any existing submission for this user and problem (keep only latest)
+      await prisma.submission.deleteMany({
+        where: {
+          userId: userId,
+          problemId: problemId
+        }
+      });
+
+      // Create new submission
+      const submission = await prisma.submission.create({
+        data: {
+          userId: userId,
+          problemId: problemId,
+          roundId: roundNumber,
+          code: source_code,
+          language: language,
+          status: submissionStatus,
+          runtime: Math.max(...results.map(r => r.time || 0)),
+          memory: Math.max(...results.map(r => r.memory || 0)),
+          testCasesPassed: passedCount,
+          executionCount: 1
+        }
+      });
+
+      // Update user score if it increased
+      if (newScore > user.eventScore) {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { eventScore: newScore }
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        submission: {
+          id: submission.id,
+          status: submissionStatus,
+          testCasesPassed: passedCount,
+          totalTestCases: totalCount,
+          score: currentScore,
+          scoreUpdated: newScore > user.eventScore
+        },
+        results,
+        summary: {
+          passed: passedCount,
+          total: totalCount,
+          percentage: Math.round((passedCount / totalCount) * 100)
+        }
+      });
+
+    } else {
+      // No test cases passed, don't create submission
+      res.status(200).json({
+        success: false,
+        message: "No test cases passed. Submission not saved.",
+        results,
+        summary: {
+          passed: passedCount,
+          total: totalCount,
+          percentage: 0
+        }
+      });
+    }
+
   } catch (error) {
-    console.error("Judge0 batch execution error:", error.message);
+    console.error("Submit execution error:", error.message);
     res.status(500).json({
-      error: "Failed to execute batch",
+      error: "Failed to submit code",
       details: error.response?.data || error.message
     });
   }
