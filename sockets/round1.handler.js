@@ -121,7 +121,49 @@ export const round1Handler = (io, socket) => {
         callback({ success: true, status: "Message handled by server." });
       }
     };
+
+
+    socket.on("round1:join", async ({ userId }) => {
+    try {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { currentRound: 1 },
+      });
+
+      await redis.sadd("round1:lobby", userId);
+
+      const participants = await redis.smembers("round1:lobby");
+      io.emit("lobby:round1", { participants });
+    } catch (error) {
+      console.error("Joining error:", error);
+    }
+  });
   
     socket.on("client:sendMessage", handleClientMessage);
+
+      socket.on("round1:ready", async ({ adminId }) => {
+    try {
+      const admin = await prisma.user.findUnique({
+        where: { id: adminId },
+      });
+      if (admin.role !== "ADMIN") return;
+
+      const endTime = Date.now() + 90 * 60 * 1000;
+      await redis.set("round1:timer", endTime);
+
+      const participants = await redis.smembers("round1:lobby");
+      for (let userId of participants) {
+        await redis.zadd("round1:readyQueue", 0, userId); // TODO: Use score/rank
+      }
+
+      await redis.del("round1:lobby");
+
+      setInterval(() => {
+        runMatchmaking();
+      }, 5000);
+    } catch (error) {
+      console.error("Ready error:", error);
+    }
+  });
   };
   
