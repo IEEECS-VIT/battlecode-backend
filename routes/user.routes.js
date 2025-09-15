@@ -11,16 +11,26 @@ router.post("/verify", verifyAuthToken, async (req, res) => {
     const email = req.user?.email;
 
     if (!email) {
+      console.error("❌ No email found in token for user:", req.user);
       // This is a safeguard; the middleware should prevent this.
       return res.status(400).json({ error: "Email not found in token." });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email },
+    // Try to find user by id (new schema where id = email)
+    let user = await prisma.user.findUnique({
+      where: { id: email },
     });
 
+    // If not found and we have old schema users, try alternative approach
     if (!user) {
-      return res.status(404).json({ error: "User has not registered for the event." });
+      // Try to find by any field that might contain the email
+      const users = await prisma.user.findMany();
+      user = users.find(u => u.id === email || u.id.includes(email.split('@')[0]));
+      
+      if (!user) {
+        console.error("❌ User not found in database for email:", email);
+        return res.status(404).json({ error: "User has not registered for the event." });
+      }
     }
 
     const hasUsername = !!user.username;
@@ -30,7 +40,7 @@ router.post("/verify", verifyAuthToken, async (req, res) => {
       hasUsername,
       user: {
         id: user.id,
-        email: user.email,
+        name: user.name, // Include the name
         username: user.username,
         role: user.role,
         createdAt: user.createdAt
@@ -60,20 +70,20 @@ router.post("/set-username", verifyAuthToken, async (req, res) => {
       where: { username: username.trim() },
     });
 
-    if (existingUser && existingUser.email !== email) {
+    if (existingUser && existingUser.id !== email) {
       return res.status(409).json({ error: "Username is already taken." });
     }
 
     // Update the user's username
     const updatedUser = await prisma.user.update({
-      where: { email },
+      where: { id: email },
       data: { username: username.trim() },
     });
 
     res.status(200).json({ 
       ok: true, 
       message: "Username updated successfully.",
-      user: { email: updatedUser.email, username: updatedUser.username }
+      user: { id: updatedUser.id, username: updatedUser.username }
     });
   } catch (error) {
     console.error("Error setting username:", error);

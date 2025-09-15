@@ -4,6 +4,7 @@ import http from 'http';
 import prisma from "../config/prisma.js";
 import { calculateScore } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
+import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
 
 const router = express.Router();
 
@@ -161,7 +162,7 @@ router.post("/run", async (req, res) => {
 router.post("/submit", verifyAuthToken, async (req, res) => {
   try {
     const { language, source_code, problemId, roundNumber } = req.body;
-    const userId = req.user?.id;
+    const userId = req.user?.email;
 
     if (!userId) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -344,6 +345,45 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           where: { id: userId },
           data: { eventScore: newScore }
         });
+      }
+
+      // Check for Round 1 match completion (all test cases passed)
+      if (roundNumber === 1 && submissionStatus === 'ACCEPTED') {
+        try {
+          // Find if user is currently in a Round 1 match
+          const activeMatch = await prisma.match.findFirst({
+            where: {
+              OR: [
+                { playerAId: userId },
+                { playerBId: userId }
+              ],
+              status: 'ONGOING',
+              problem: {
+                roundId: 1
+              }
+            },
+            include: {
+              problem: true
+            }
+          });
+
+          if (activeMatch && activeMatch.problem.id === problemId) {
+            console.log(`[Round 1] User ${userId} completed match ${activeMatch.id} by solving problem ${problemId}`);
+            
+            // Get the Round 1 match end handler
+            const round1MatchEndHandler = getRound1MatchEndHandler();
+            if (round1MatchEndHandler) {
+              // Call the match end handler with the winner
+              await round1MatchEndHandler(activeMatch.id, userId);
+              console.log(`[Round 1] Match ${activeMatch.id} ended. Winner: ${userId}`);
+            } else {
+              console.error('[Round 1] Match end handler not available');
+            }
+          }
+        } catch (matchEndError) {
+          console.error('[Round 1] Error handling match completion:', matchEndError);
+          // Don't throw error to avoid breaking the submission response
+        }
       }
 
       res.status(200).json({

@@ -72,7 +72,7 @@ export const round1Handler = (io, socket) => {
      * @returns {object} Object with userId/email or error
      */
     const validateUser = () => {
-        const userId = socket.user?.id;
+        const userId = socket.user?.email;
         const email = socket.user?.email;
         if (!userId || !email) {
             return { error: 'Unauthorized - No user ID or email' };
@@ -596,8 +596,8 @@ export const round1Handler = (io, socket) => {
             } else {
                 // Fetch user data from database
                 const userData = await prisma.user.findUnique({
-                    where: { email },
-                    select: { id: true, username: true, role: true, email: true, eventScore: true }
+                    where: { id: email },
+                    select: { id: true, username: true, role: true, eventScore: true }
                 });
 
                 if (!userData) {
@@ -642,7 +642,7 @@ export const round1Handler = (io, socket) => {
         try {
             // Check if user is admin
             const userData = await prisma.user.findUnique({
-                where: { email },
+                where: { id: email },
                 select: { role: true }
             });
 
@@ -792,7 +792,7 @@ export const round1Handler = (io, socket) => {
         try {
             // Check if user is admin
             const userData = await prisma.user.findUnique({
-                where: { email: validation.email },
+                where: { id: validation.email },
                 select: { role: true }
             });
 

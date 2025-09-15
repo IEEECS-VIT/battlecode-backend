@@ -1,7 +1,7 @@
 export const round3Handler = (io, socket) => {
     const handleClientMessage = (payload, callback) => {
       console.log(
-        `Message from client ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
+        `Message from client ${socket.id} (User: ${socket.user.email}): "${payload.message}"`
       );
   
       socket.emit("server:messageReceived", {

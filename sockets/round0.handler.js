@@ -267,8 +267,8 @@ export const round0Handler = (io, socket) => {
       // Step 1: Fetch and validate user data from database first
       try {
         userData = await prisma.user.findUnique({
-          where: { email },
-          select: { id: true, username: true, role: true, email: true }
+          where: { id: email },
+          select: { id: true, username: true, role: true }
         });
       } catch (error) {
         console.error('Error fetching user data:', error);
@@ -407,8 +407,8 @@ export const round0Handler = (io, socket) => {
       // Step 1: Fetch and validate user data from database
       try {
         userData = await prisma.user.findUnique({
-          where: { email },
-          select: { id: true, username: true, role: true, email: true }
+          where: { id: email },
+          select: { id: true, username: true, role: true }
         });
       } catch (error) {
         console.error('Error fetching user data:', error);
@@ -914,7 +914,7 @@ export const round0Handler = (io, socket) => {
     try {
       // Check if user is admin
       const userData = await prisma.user.findUnique({
-        where: { email },
+        where: { id: email },
         select: { role: true }
       });
 

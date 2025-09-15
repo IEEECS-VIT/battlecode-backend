@@ -8,7 +8,7 @@ const router = express.Router();
 const requireAdmin = async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({
-      where: { email: req.user.email },
+      where: { id: req.user.email },
       select: { role: true }
     });
 

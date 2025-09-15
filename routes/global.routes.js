@@ -5,11 +5,30 @@ const router = Router();
 
 router.get("/", async (req, res) => {
   try {
-    const users = await prisma.user.findMany();
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        eventScore: true,
+        currentRound: true,
+        regNo: true,
+        role: true
+      },
+      orderBy: [
+        { eventScore: 'desc' },
+        { name: 'asc' }
+      ]
+    });
+    
+    console.log(`Sending leaderboard data: ${users.length} users`);
     res.json(users);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error fetching user data" });
+    console.error("Error fetching user data:", error.message);
+    res.status(500).json({ 
+      error: "Error fetching user data",
+      message: error.message 
+    });
   }
 });
 

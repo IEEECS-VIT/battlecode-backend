@@ -11,8 +11,7 @@ model User {
   id               String           @id
   name             String
   regNo            String           @unique
-  username         String           @unique
-  email            String           @unique
+  username         String?          @unique
   role             Role             @default(PLAYER)
   eventScore       Int              @default(0)
   currentRound     Int              @default(0)
