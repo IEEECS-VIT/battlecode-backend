@@ -2,7 +2,7 @@ import express from "express";
 import axios from "axios";
 import http from 'http';
 import prisma from "../config/prisma.js";
-import { calculateScore } from "../utils/calculateScore.js";
+// import { calculateScore } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
 
@@ -304,7 +304,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     // Only create submission if at least one test case passes
     if (hasAnyPass) {
       // Calculate score (black box returns 5 for now)
-      const currentScore = calculateScore() || 5;
+      const currentScore = 5;
 
       // Get user's current score
       const user = await prisma.user.findUnique({
