@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import express from "express";
 import { verifySocketToken } from "../middleware/authMiddleware.js";
-import { round0Handler } from "./round0.handler.js";
+import { round0Handler } from "./round0.handler.js";  
 import { round1Handler } from "./round1.handler.js";
 import { round2Handler } from "./round2.handler.js";
 import { round3Handler } from "./round3.handler.js";
@@ -18,6 +18,13 @@ let previousLeaderboardHash = null;
 const checkAndBroadcastLeaderboard = async (io) => {
   try {
     const currentLeaderboard = await getLeaderboard();
+    
+    // Don't proceed if leaderboard is empty (likely database error)
+    if (!currentLeaderboard || currentLeaderboard.length === 0) {
+      console.log("Skipping leaderboard broadcast - empty leaderboard received");
+      return;
+    }
+    
     const currentHash = JSON.stringify(currentLeaderboard);
     
     // Only broadcast if there are changes
@@ -25,9 +32,12 @@ const checkAndBroadcastLeaderboard = async (io) => {
       console.log("Leaderboard changes detected, broadcasting update...");
       await broadcastLeaderboard(io);
       previousLeaderboardHash = currentHash;
+    } else {
+      console.log("No leaderboard changes detected");
     }
   } catch (error) {
-    console.error("Error checking leaderboard changes:", error);
+    console.error("Error checking leaderboard changes:", error.message);
+    // Don't throw error to prevent interval from stopping
   }
 };
 
@@ -50,7 +60,7 @@ export default function initializeSocket(io) {
       }
 
       socket.user = user;
-      console.log(`User authenticated: ${user.id}`);
+      console.log(`User authenticated: ${user.email}`);
       next();
     } catch (error) {
       console.error("Authentication error:", error);
@@ -59,7 +69,7 @@ export default function initializeSocket(io) {
   });
 
   const onConnection = (socket) => {
-    console.log(`User connected: ${socket.user.id} (Socket ID: ${socket.id})`);
+    console.log(`User connected: ${socket.user.email} (Socket ID: ${socket.id})`);
 
     round0Handler(io, socket);
     round1Handler(io, socket);
@@ -70,19 +80,19 @@ export default function initializeSocket(io) {
 
     socket.on("disconnect", () => {
       console.log(
-        `User disconnected: ${socket.user.id} (Socket ID: ${socket.id})`
+        `User disconnected: ${socket.user.email} (Socket ID: ${socket.id})`
       );
     });
   };
 
   io.on("connection", onConnection);
 
-  // Set up automatic leaderboard broadcasting every 2 minutes
+  // Set up automatic leaderboard broadcasting every 10 minutes (reduced frequency to reduce DB load)
   const leaderboardInterval = setInterval(() => {
     checkAndBroadcastLeaderboard(io);
-  }, 2 * 60 * 1000); // 2 minutes in milliseconds
+  }, 10 * 60 * 1000); // 10 minutes in milliseconds
 
-  console.log("Socket server initialized with automatic leaderboard broadcasting every 2 minutes");
+  console.log("Socket server initialized with automatic leaderboard broadcasting every 10 minutes");
 
   // Clean up interval when server shuts down
   process.on('SIGINT', () => {

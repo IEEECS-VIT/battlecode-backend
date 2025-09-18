@@ -32,6 +32,7 @@ const broadcastLobbyUpdate = async (io) => {
 };
 
 export const round3Handler = (io, socket) => {
+
   const userId = socket.user.id;
 
   // 1. handleJoin (Client -> Server)
@@ -178,6 +179,7 @@ export const round3Handler = (io, socket) => {
       const submitters = await prisma.user.findMany({
         where: { id: { in: submitterIds } },
         select: { id: true, username: true },
+
       });
       const submissions = submitters.map(submitter => ({
         submitterId: submitter.id,

@@ -6,7 +6,7 @@ export const adminHandler = (io, socket) => {
   const isAdmin = socket.user.role === 'ADMIN';
   
   if (!isAdmin) {
-    console.log(`Non-admin user ${socket.user.id} tried to access admin functions`);
+    console.log(`Non-admin user ${socket.user.email} tried to access admin functions`);
     return;
   }
 
