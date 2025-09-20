@@ -47,6 +47,8 @@ export default function initializeSocket(io) {
       const token =
         socket.handshake.auth.token ||
         socket.handshake.headers.authorization?.replace("Bearer ", "");
+      
+      // console.log("Socket attempting authentication with token:", token);
 
       if (!token) {
         console.error("Authentication error: Token not provided.");

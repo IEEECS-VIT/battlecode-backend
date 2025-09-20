@@ -2,7 +2,7 @@ import express from "express";
 import axios from "axios";
 import http from 'http';
 import prisma from "../config/prisma.js";
-// import { calculateScore } from "../utils/calculateScore.js";
+import { ScoreRound0, ScoreRound1 } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
 
@@ -303,25 +303,81 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     // Only create submission if at least one test case passes
     if (hasAnyPass) {
-      // Calculate score (black box returns 5 for now)
-      const currentScore = 5;
+      // Get existing submissions for this user and problem to calculate execution count
+      const existingSubmissions = await prisma.submission.findMany({
+        where: {
+          userId: userId,
+          problemId: problemId
+        },
+        orderBy: {
+          createdAt: 'desc'
+        }
+      });
 
-      // Get user's current score
+      const executionCount = existingSubmissions.length + 1;
+
+      // Calculate score based on round
+      let currentScore = 0;
+      let scoreUpdated = false;
+
+      if (roundNumber === 0) {
+        // Use ScoreRound0: (totalcases, passedcases, submits)
+        currentScore = ScoreRound0(totalCount, passedCount, executionCount);
+        console.log(`[Round 0] Score calculation: total=${totalCount}, passed=${passedCount}, submits=${executionCount}, score=${currentScore}`);
+      } else if (roundNumber === 1) {
+        // Round 1 scoring would be handled in match completion
+        currentScore = 5; // Placeholder for Round 1
+      } else {
+        // Default scoring for other rounds
+        currentScore = Math.max(1, Math.round((passedCount / totalCount) * 5));
+      }
+
+      // Get user's current score and problem-specific submissions
       const user = await prisma.user.findUnique({
         where: { id: userId },
         select: { eventScore: true }
       });
 
-      // Update score only if it has increased
-      const newScore = Math.max(user.eventScore, currentScore);
+      // For Round 0, each problem contributes independently to total score
+      if (roundNumber === 0) {
+        // Check if this is the user's best score for this specific problem
+        const bestPreviousSubmission = existingSubmissions.find(sub => sub.status === 'ACCEPTED') || 
+                                     existingSubmissions[0]; // Get best or most recent
 
-      // Delete any existing submission for this user and problem (keep only latest)
-      await prisma.submission.deleteMany({
-        where: {
-          userId: userId,
-          problemId: problemId
+        const previousBestScore = bestPreviousSubmission ? 
+          ScoreRound0(
+            (bestPreviousSubmission.testCasesPassed || 0) + 
+            (totalCount - (bestPreviousSubmission.testCasesPassed || 0)), 
+            bestPreviousSubmission.testCasesPassed || 0, 
+            existingSubmissions.length
+          ) : 0;
+
+        console.log(`[Round 0] Previous best score for problem ${problemId}: ${previousBestScore}, New score: ${currentScore}`);
+
+        // Only update total score if this problem submission improved
+        if (currentScore > previousBestScore) {
+          const scoreIncrease = currentScore - previousBestScore;
+          const newTotalScore = user.eventScore + scoreIncrease;
+          
+          await prisma.user.update({
+            where: { id: userId },
+            data: { eventScore: newTotalScore }
+          });
+          
+          scoreUpdated = true;
+          console.log(`[Round 0] User ${userId} score increased by ${scoreIncrease} (${user.eventScore} -> ${newTotalScore}) for problem ${problemId}`);
         }
-      });
+      }
+
+      // Delete previous submissions for this problem (keep only the latest)
+      if (existingSubmissions.length > 0) {
+        await prisma.submission.deleteMany({
+          where: {
+            userId: userId,
+            problemId: problemId
+          }
+        });
+      }
 
       // Create new submission
       const submission = await prisma.submission.create({
@@ -335,17 +391,15 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           runtime: Math.max(...results.map(r => r.time || 0)),
           memory: Math.max(...results.map(r => r.memory || 0)),
           testCasesPassed: passedCount,
-          executionCount: 1
+          executionCount: executionCount
         }
       });
 
-      // Update user score if it increased
-      if (newScore > user.eventScore) {
-        await prisma.user.update({
-          where: { id: userId },
-          data: { eventScore: newScore }
-        });
-      }
+      // Get updated user score after potential increase
+      const updatedUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { eventScore: true }
+      });
 
       // Check for Round 1 match completion (all test cases passed)
       if (roundNumber === 1 && submissionStatus === 'ACCEPTED') {
@@ -394,7 +448,9 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           testCasesPassed: passedCount,
           totalTestCases: totalCount,
           score: currentScore,
-          scoreUpdated: newScore > user.eventScore
+          executionCount: executionCount,
+          scoreUpdated: roundNumber === 0 ? scoreUpdated : false,
+          totalScore: updatedUser.eventScore
         },
         results,
         summary: {

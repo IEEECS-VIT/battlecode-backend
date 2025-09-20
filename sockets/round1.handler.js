@@ -1,94 +1,54 @@
 /**
- * ROUND 1 SOCKET HANDLER
- * * CLIENT → SERVER EVENTS:
- * - round1:join - Join round lobby
- * - round1:ready - Start round (admin only)  
- * - round1:getState - Get current game state
- * - round1:reset - Reset round (admin only)
- * - disconnect - Handle user disconnect
- * * SERVER → CLIENT EVENTS:
- * - lobby:round1 - Lobby participant updates
- * - round1:started - Round officially started
- * - round1:matchFound - Match found with opponent and question
- * - round1:cooldown - Match ended, cooldown period started
- * - round1:ended - Round ended (90min timer)
- * - match:pause - Match paused due to opponent disconnect
- * - match:resume - Match resumed after opponent reconnect
- * * REDIS KEYS:
- * - round1:participants - Hash of participants {userId: participantData}
- * - round1:readyQueue - Sorted set of ready players (score=rank)
- * - round1:matches - Hash of active matches {matchId: matchData}
- * - round1:status - Round status ("running" | "ended")
- * * ROUND 1 FLOW:
- * 1. Lobby Phase: Users join and wait for admin to start
- * 2. Matchmaking Phase: 90min timer, continuous 5sec matchmaking cycles
- * 3. Match Phase: 1v1 matches with difficulty-based timers (15/20/25min)
- * 4. Cooldown Phase: 2min cooldown after each match
- * 5. Re-queue Phase: Back to matchmaking queue automatically
- * * DIFFICULTY TIERS:
- * - G1 (Top third): Hard questions, 25min timer
- * - G2 (Middle third): Medium questions, 20min timer  
- * - G3 (Bottom third): Easy questions, 15min timer
- * * SPECIAL HANDLING:
- * - Long wait (>5min): Force match with lower difficulty
- * - Odd numbers: Balance between groups, use bots if needed
- * - Disconnections: 1min timeout, opponent auto-wins
+ * ROUND 1 SOCKET HANDLER - FIXED VERSION
+ * Addresses cooldown timer synchronization issues and improves state management
  */
 
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
 
 // Constants
-const ROUND_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
+const ROUND_DURATION = 90 * 60 * 1000;
 const ROUND_NUMBER = 1;
-const MATCHMAKING_INTERVAL = 5000; // 5 seconds
-const COOLDOWN_DURATION = 2 * 60 * 1000; // 2 minutes
-const DISCONNECT_TIMEOUT = 1 * 60 * 1000; // 1 minute
-const LONG_WAIT_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+const INITIAL_MATCHMAKING_INTERVAL = 5000;
+const POST_MATCH_MATCHMAKING_INTERVAL = 3 * 60 * 1000;
+const COOLDOWN_DURATION = 2 * 60 * 1000;
+const DISCONNECT_TIMEOUT = 1 * 60 * 1000;
+const LONG_WAIT_THRESHOLD = 5 * 60 * 1000;
 
 // Global variables for round management
 let globalTimer = null;
+let globalTimerInterval = null;
 let matchmakingInterval = null;
+let matchmakingCycleInterval = null;
+let cooldownTimers = new Map(); // Store cooldown timers per user: { userId: { interval, timeout, startTime, duration } }
+let isFirstMatchCycleCompleted = false;
+const disconnectTimers = new Map(); // Stores disconnect setTimeout IDs { userId: timeoutId }
 
 // Store handleMatchEnd function globally so it can be accessed from external routes
 let round1MatchEndHandler = null;
 
-/**
- * Gets Redis keys for Round 1 - made available outside handler
- * @param {string} userId - Optional user ID for user-specific keys
- * @returns {object} Object with Redis key names
- */
 const getRedisKeys = (userId = null) => ({
     participants: `round${ROUND_NUMBER}:participants`,
     readyQueue: `round${ROUND_NUMBER}:readyQueue`,
     matches: `round${ROUND_NUMBER}:matches`,
     status: `round${ROUND_NUMBER}:status`,
     presence: userId ? `round${ROUND_NUMBER}:user:${userId}` : null,
-    disconnectTimers: `round${ROUND_NUMBER}:disconnectTimers`,
-    matchTimers: `round${ROUND_NUMBER}:matchTimers`
+    matchTimers: `round${ROUND_NUMBER}:matchTimers`,
 });
 
-// --- Main Handler ---
 export const round1Handler = (io, socket) => {
 
-    // --- Utility Functions ---
-
-    /**
-     * Validates the current user from socket
-     * @returns {object} Object with userId/email or error
-     */
     const validateUser = () => {
         const userId = socket.user?.email;
         const email = socket.user?.email;
         if (!userId || !email) {
+            console.error(`[Validation] Missing user data - userId: ${userId}, email: ${email}`);
             return { error: 'Unauthorized - No user ID or email' };
         }
+        console.log(`[Validation] User validated - userId: ${userId}`);
         return { userId, email };
     };
 
-    /**
-     * Broadcasts lobby update to all participants
-     */
     const broadcastLobbyUpdate = async () => {
         try {
             const keys = getRedisKeys();
@@ -97,6 +57,8 @@ export const round1Handler = (io, socket) => {
                 .map(p => JSON.parse(p))
                 .filter(p => p.status === 'lobby');
             
+            const allParticipantsList = Object.values(allParticipants).map(p => JSON.parse(p));
+            
             const currentStatus = await redis.get(keys.status);
             
             io.emit('lobby:round1', { 
@@ -104,40 +66,233 @@ export const round1Handler = (io, socket) => {
                 totalParticipants: lobbyParticipants.length,
                 isActive: currentStatus === "running"
             });
+            
+            // Also emit detailed participants update for waiting room
+            io.emit('round1:participantsUpdate', {
+                participants: allParticipantsList
+            });
         } catch (error) {
-            console.error('[Broadcast Error] Failed to broadcast lobby update:', error);
+            console.error('[Broadcast Error]', error);
         }
     };
 
-    /**
-     * Resets round state (admin only)
-     */
+    const startGlobalTimerBroadcast = (roundStartTime) => {
+        // Clear any existing global timer broadcast
+        if (globalTimerInterval) clearInterval(globalTimerInterval);
+        
+        console.log(`[Global Timer] Starting global timer broadcast from ${roundStartTime}`);
+        
+        globalTimerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - roundStartTime) / 1000);
+            const remaining = Math.max(0, Math.floor(ROUND_DURATION / 1000) - elapsed);
+            
+            io.emit('round1:globalTimer', { timeRemaining: remaining });
+            console.log(`[Global Timer] Broadcasting: ${remaining}s remaining`);
+            
+            if (remaining <= 0) {
+                clearInterval(globalTimerInterval);
+                globalTimerInterval = null;
+                console.log(`[Global Timer] Timer ended, broadcast stopped`);
+            }
+        }, 1000);
+    };
+
+    const startMatchmakingCycleBroadcast = () => {
+        // Clear any existing cycle timer
+        if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+        
+        matchmakingCycleInterval = setInterval(() => {
+            if (isFirstMatchCycleCompleted) {
+                // Regular 3-minute cycles
+                const cycleInterval = 3 * 60;
+                const now = Math.floor(Date.now() / 1000);
+                const nextCycle = cycleInterval - (now % cycleInterval);
+                
+                io.emit('round1:matchmakingCycle', { 
+                    nextCycle, 
+                    isFirstCycle: false,
+                    intervalType: 'regular'
+                });
+                
+                console.log(`[Matchmaking Cycle] Next regular cycle in ${nextCycle}s`);
+            } else {
+                // Initial 5-second cycles
+                const cycleInterval = 5;
+                const now = Math.floor(Date.now() / 1000);
+                const nextCycle = cycleInterval - (now % cycleInterval);
+                
+                io.emit('round1:matchmakingCycle', { 
+                    nextCycle, 
+                    isFirstCycle: true,
+                    intervalType: 'initial'
+                });
+                
+                console.log(`[Matchmaking Cycle] Next initial cycle in ${nextCycle}s`);
+            }
+        }, 1000);
+    };
+
+    // FIXED: More robust cooldown timer management
+    const startCooldownTimer = async (userId, duration, startTime) => {
+        // Clear any existing cooldown timer for this user
+        if (cooldownTimers.has(userId)) {
+            const existingTimer = cooldownTimers.get(userId);
+            if (existingTimer.interval) clearInterval(existingTimer.interval);
+            if (existingTimer.timeout) clearTimeout(existingTimer.timeout);
+            cooldownTimers.delete(userId);
+        }
+
+        // Get the latest participant data
+        const participant = await redis.hget(getRedisKeys().participants, userId);
+        if (!participant) {
+            console.log(`[Cooldown Timer] No participant found for ${userId}`);
+            return;
+        }
+
+        const participantData = JSON.parse(participant);
+        
+        // Verify participant is actually in cooldown
+        if (participantData.status !== 'cooldown') {
+            console.log(`[Cooldown Timer] Participant ${userId} not in cooldown status, skipping timer`);
+            return;
+        }
+
+        console.log(`[Cooldown Timer] Starting cooldown timer for ${userId}, duration: ${Math.ceil(duration/1000)}s, startTime: ${startTime}`);
+
+        // Calculate initial remaining time more accurately
+        const elapsed = Date.now() - startTime;
+        const initialRemaining = Math.max(0, Math.ceil((duration - elapsed) / 1000));
+        
+        if (initialRemaining <= 0) {
+            console.log(`[Cooldown Timer] Cooldown already expired for ${userId}, ending immediately`);
+            await endCooldownForUser(userId);
+            return;
+        }
+
+        // Broadcast cooldown timer every second
+        const cooldownInterval = setInterval(async () => {
+            const currentElapsed = Date.now() - startTime;
+            const remaining = Math.max(0, Math.ceil((duration - currentElapsed) / 1000));
+            
+            // Get current socket for this user
+            const currentParticipant = await redis.hget(getRedisKeys().participants, userId);
+            if (!currentParticipant) {
+                console.log(`[Cooldown Timer] Participant ${userId} no longer exists, stopping timer`);
+                clearInterval(cooldownInterval);
+                cooldownTimers.delete(userId);
+                return;
+            }
+
+            const currentParticipantData = JSON.parse(currentParticipant);
+            const userSocket = io.sockets.sockets.get(currentParticipantData.socketId);
+            
+            if (userSocket && currentParticipantData.status === 'cooldown') {
+                userSocket.emit('round1:cooldownTimer', { 
+                    timeRemaining: remaining,
+                    duration: Math.ceil(duration / 1000),
+                    startTime: startTime
+                });
+                console.log(`[Cooldown Timer] ${userId}: ${remaining}s remaining`);
+            }
+            
+            if (remaining <= 0) {
+                console.log(`[Cooldown Timer] Timer reached 0 for ${userId}`);
+                clearInterval(cooldownInterval);
+                cooldownTimers.delete(userId);
+                await endCooldownForUser(userId);
+            }
+        }, 1000);
+
+        // Set timeout for when cooldown actually ends (backup mechanism)
+        const actualRemainingDuration = Math.max(1000, duration - (Date.now() - startTime));
+        const cooldownTimeout = setTimeout(async () => {
+            console.log(`[Cooldown Timer] Backup timeout triggered for ${userId}`);
+            clearInterval(cooldownInterval);
+            cooldownTimers.delete(userId);
+            await endCooldownForUser(userId);
+        }, actualRemainingDuration);
+
+        cooldownTimers.set(userId, {
+            interval: cooldownInterval,
+            timeout: cooldownTimeout,
+            startTime,
+            duration
+        });
+    };
+
+    // FIXED: Separate function for ending cooldown to avoid duplication
+    const endCooldownForUser = async (userId) => {
+        const keys = getRedisKeys();
+        const latestPlayerStr = await redis.hget(keys.participants, userId);
+        if (!latestPlayerStr) {
+            console.log(`[Cooldown End] No participant found for ${userId}`);
+            return;
+        }
+        
+        const latestPlayer = JSON.parse(latestPlayerStr);
+        
+        // Only end cooldown if user is actually in cooldown
+        if (latestPlayer.status === 'cooldown') {
+            latestPlayer.status = 'waiting';
+            latestPlayer.waitingSince = Date.now();
+            delete latestPlayer.cooldownStartTime;
+            await redis.hset(keys.participants, userId, JSON.stringify(latestPlayer));
+            
+            // Add back to matchmaking queue
+            await redis.zadd(keys.readyQueue, latestPlayer.rank, userId);
+            
+            // Notify the user
+            const userSocket = io.sockets.sockets.get(latestPlayer.socketId);
+            if (userSocket) {
+                userSocket.emit('round1:cooldownEnd');
+            }
+            
+            console.log(`[Cooldown End] Player ${userId} back in queue.`);
+            
+            // Broadcast updated participant list
+            await broadcastLobbyUpdate();
+        } else {
+            console.log(`[Cooldown End] Player ${userId} not in cooldown status: ${latestPlayer.status}`);
+        }
+    };
+
+    // FIXED: Helper function to calculate accurate cooldown remaining time
+    const getCooldownTimeRemaining = (cooldownStartTime) => {
+        if (!cooldownStartTime) return 0;
+        const elapsed = Date.now() - cooldownStartTime;
+        return Math.max(0, Math.ceil((COOLDOWN_DURATION - elapsed) / 1000));
+    };
+
     const resetRoundState = async () => {
         try {
             console.log("[Reset] Resetting Round 1 state...");
             
-            // Clear timers
-            if (globalTimer) {
-                clearTimeout(globalTimer);
-                globalTimer = null;
-            }
-            if (matchmakingInterval) {
-                clearInterval(matchmakingInterval);
-                matchmakingInterval = null;
-            }
+            if (globalTimer) clearTimeout(globalTimer);
+            if (globalTimerInterval) clearInterval(globalTimerInterval);
+            if (matchmakingInterval) clearInterval(matchmakingInterval);
+            if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
             
-            // Clear Redis data including timers
+            globalTimer = null;
+            globalTimerInterval = null;
+            matchmakingInterval = null;
+            matchmakingCycleInterval = null;
+            isFirstMatchCycleCompleted = false;
+
+            disconnectTimers.forEach(timeout => clearTimeout(timeout));
+            disconnectTimers.clear();
+            
+            cooldownTimers.forEach(timer => {
+                if (timer.interval) clearInterval(timer.interval);
+                if (timer.timeout) clearTimeout(timer.timeout);
+            });
+            cooldownTimers.clear();
+            
             const keys = getRedisKeys();
             await redis.del(
-                keys.participants, 
-                keys.readyQueue, 
-                keys.matches, 
-                keys.status,
-                keys.disconnectTimers,
-                keys.matchTimers
+                keys.participants, keys.readyQueue, keys.matches, 
+                keys.status, keys.matchTimers
             );
             
-            // Reset database status
             await prisma.round.update({
                 where: { roundNumber: 1 },
                 data: { status: 'LOBBY' }
@@ -151,25 +306,12 @@ export const round1Handler = (io, socket) => {
         }
     };
 
-    /**
-     * Fetches a random problem of a given difficulty for Round 1 from the database.
-     * @param {('R1_EASY'|'R1_MEDIUM'|'R1_HARD')} difficulty - The difficulty level.
-     * @returns {Promise<object|null>} A problem object or null if none are found.
-     */
     const getQuestionByDifficulty = async (difficulty) => {
         try {
             const problems = await prisma.problem.findMany({
-                where: {
-                    roundId: 1,
-                    difficulty: difficulty,
-                },
+                where: { roundId: 1, difficulty },
             });
-
-            if (problems.length === 0) {
-                console.error(`[DB Error] No problems found for Round 1 with difficulty ${difficulty}`);
-                return null;
-            }
-            // Return a random problem from the list
+            if (problems.length === 0) return null;
             return problems[Math.floor(Math.random() * problems.length)];
         } catch (error) {
             console.error("[Prisma Error] Failed to fetch question:", error);
@@ -177,685 +319,565 @@ export const round1Handler = (io, socket) => {
         }
     };
 
-    /**
-     * The core matchmaking logic. Runs periodically to create matches.
-     */
     const runMatchmakingCycle = async () => {
         try {
-            const queueSize = await redis.zcard("round1:readyQueue");
-            if (queueSize < 1) return;
-
-            console.log(`[Matchmaking] Running cycle with ${queueSize} players in queue.`);
-            
-            // Fetch all players from the ready queue, sorted by rank
-            const waitingPlayerIds = await redis.zrange("round1:readyQueue", 0, -1);
-            if (waitingPlayerIds.length === 0) return;
-
-            const playerPipelines = waitingPlayerIds.map(id => redis.hget("round1:participants", id));
-            const results = await Promise.all(playerPipelines);
-            let waitingPlayers = results.map(p => JSON.parse(p)).filter(Boolean);
-
-
-            // 1. Handle long-waiting players first (> 5 minutes)
-            const now = Date.now();
-            const longWaiters = waitingPlayers.filter(p => (now - p.waitingSince) > LONG_WAIT_THRESHOLD);
-            let normalWaiters = waitingPlayers.filter(p => (now - p.waitingSince) <= LONG_WAIT_THRESHOLD);
-            
-            while (longWaiters.length >= 2) {
-                const player1 = longWaiters.shift();
-                const player2 = longWaiters.shift();
-                console.log(`[Matchmaking] Force-matching long-waiting players: ${player1.id} and ${player2.id}`);
-                // Use the difficulty of the lower-ranked player's group
-                const lowerRank = Math.max(player1.rank, player2.rank);
-                const totalPlayers = normalWaiters.length + longWaiters.length + 2; // +2 for current pair
-                const third = Math.ceil(totalPlayers / 3);
-                let difficulty;
-                if (lowerRank <= third) difficulty = 'R1_HARD';
-                else if (lowerRank <= 2 * third) difficulty = 'R1_MEDIUM';
-                else difficulty = 'R1_EASY';
-                
-                await createMatch(player1, player2, difficulty);
-            }
-            normalWaiters.push(...longWaiters);
-
-            if (normalWaiters.length < 2) {
-                if (normalWaiters.length === 1) {
-                    console.log(`[Matchmaking] Only one player left. Creating match with second player when available.`);
-                    // For now, keep single player in queue rather than bot matching
-                }
+            const queueSize = await redis.zcard(getRedisKeys().readyQueue);
+            if (queueSize < 2) {
+                console.log(`[Matchmaking] Skipping cycle - only ${queueSize} players in queue`);
                 return;
             }
 
-            // 2. Group remaining players by rank (already sorted from Redis ZRANGE)
-            const third = Math.ceil(normalWaiters.length / 3);
-            let g1 = normalWaiters.slice(0, third);      // Hard
-            let g2 = normalWaiters.slice(third, 2 * third); // Medium
-            let g3 = normalWaiters.slice(2 * third);    // Easy
+            console.log(`[Matchmaking] Running cycle with ${queueSize} players.`);
+            
+            const playerIds = await redis.zrange(getRedisKeys().readyQueue, 0, -1);
+            const playerPromises = playerIds.map(id => redis.hget(getRedisKeys().participants, id));
+            const playersRaw = await Promise.all(playerPromises);
+            let waitingPlayers = playersRaw.map(p => JSON.parse(p)).filter(Boolean);
 
-            // 3. Balance groups - move players to handle odd numbers
-            if (g1.length % 2 !== 0 && g2.length % 2 !== 0) {
-                g2.unshift(g1.pop()); // Move lowest from G1 to G2
-            }
-            if (g2.length % 2 !== 0 && g3.length % 2 !== 0) {
-                g3.unshift(g2.pop()); // Move lowest from G2 to G3
+            // Only include players who are actually waiting (not in cooldown)
+            waitingPlayers = waitingPlayers.filter(p => p.status === 'waiting');
+
+            if (waitingPlayers.length < 2) {
+                console.log(`[Matchmaking] Skipping cycle - only ${waitingPlayers.length} players actually waiting`);
+                return;
             }
 
-            // 4. Create matches for each group
+            const third = Math.ceil(waitingPlayers.length / 3);
+            let g1 = waitingPlayers.slice(0, third);
+            let g2 = waitingPlayers.slice(third, 2 * third);
+            let g3 = waitingPlayers.slice(2 * third);
+
+            if (g1.length % 2 !== 0 && g2.length > 0) g2.unshift(g1.pop());
+            if (g2.length % 2 !== 0 && g3.length > 0) g3.unshift(g2.pop());
+
             const processGroup = async (group, difficulty) => {
                 while (group.length >= 2) {
                     await createMatch(group.shift(), group.shift(), difficulty);
-                }
-                // Keep single player in queue for next cycle
-                if (group.length === 1) {
-                    console.log(`[Matchmaking] One player remaining in ${difficulty} group, keeping in queue.`);
                 }
             };
 
             await Promise.all([
                 processGroup(g1, 'R1_HARD'),
                 processGroup(g2, 'R1_MEDIUM'),
-                processGroup(g3, 'R1_EASY')
+                processGroup(g3, 'R1_EASY'),
             ]);
+
         } catch (error) {
             console.error("[Matchmaking Error]", error);
         }
     };
 
-    /**
-     * Creates a match, saves it to the DB, updates Redis state, and notifies clients.
-     * @param {object} player1 - The first player's participant object.
-     * @param {object} player2 - The second player's participant object or a Bot object.
-     * @param {( 'R1_EASY'|'R1_MEDIUM'|'R1_HARD')} difficulty - The difficulty for the match.
-     */
-
-    /**
-     * Starts a synchronized timer for a match and broadcasts updates to both players
-     */
     const startMatchTimer = (matchId, durationMs) => {
         const timerInterval = setInterval(async () => {
-            // Get match details from Redis
-            const matchStr = await redis.hget("round1:matches", matchId);
-            if (!matchStr) {
-                clearInterval(timerInterval);
-                await redis.hdel("round1:matchTimers", matchId);
-                return;
-            }
-            
-            const match = JSON.parse(matchStr);
-            
-            // Calculate remaining time based on elapsed time from match start
-            const elapsed = Date.now() - match.startTime;
-            const timeRemaining = Math.max(0, Math.floor((durationMs - elapsed) / 1000));
-            
-            // Broadcast timer update to both players
-            for (const playerId of match.players) {
-                if (playerId === 'Team-Bot') continue;
-                
-                const playerStr = await redis.hget("round1:participants", playerId);
-                if (!playerStr) continue;
-                
-                const player = JSON.parse(playerStr);
-                const playerSocket = io.sockets.sockets.get(player.socketId);
-                if (playerSocket) {
-                    playerSocket.emit('round1:timerUpdate', { 
-                        timeRemaining: timeRemaining,
-                        matchId: matchId 
-                    });
+            try {
+                const matchStr = await redis.hget(getRedisKeys().matches, matchId);
+                if (!matchStr) {
+                    clearInterval(timerInterval);
+                    return;
                 }
-            }
-            
-            // Auto-end match when timer expires
-            if (timeRemaining <= 0) {
+                const match = JSON.parse(matchStr);
+                const elapsed = Date.now() - match.startTime;
+                const timeRemaining = Math.max(0, Math.floor((durationMs - elapsed) / 1000));
+                
+                io.to(`match:${matchId}`).emit('round1:timerUpdate', { timeRemaining });
+                
+                if (timeRemaining <= 0) {
+                    clearInterval(timerInterval);
+                    console.log(`[Timer] Match ${matchId} time expired.`);
+                    await handleMatchEnd(matchId, null);
+                }
+            } catch (error) {
                 clearInterval(timerInterval);
-                await redis.hdel("round1:matchTimers", matchId);
-                console.log(`[Timer] Match ${matchId} time expired - ending match with no winner`);
-                await handleMatchEnd(matchId, null); // No winner on timeout
+                console.error(`[Timer Error] Match ${matchId}:`, error);
             }
         }, 1000);
-        
-        // Store timer reference in Redis for persistence
-        redis.hset("round1:matchTimers", matchId, JSON.stringify({
-            startTime: Date.now(),
-            duration: durationMs,
-            intervalId: timerInterval[Symbol.toPrimitive] ? timerInterval[Symbol.toPrimitive]() : Date.now()
-        }));
-        console.log(`[Timer] Started ${Math.floor(durationMs/1000)}s timer for match ${matchId}`);
     };
 
     const createMatch = async (player1, player2, difficulty) => {
+        let timerDuration;
+        if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
+        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
+        else timerDuration = 15 * 60 * 1000;
+
         const question = await getQuestionByDifficulty(difficulty);
         if (!question) {
-            console.error(`Could not create match, no question found for difficulty ${difficulty}`);
+            console.error(`No question for difficulty ${difficulty}. Cannot create match.`);
             return;
         }
 
-        // Get timer duration based on difficulty
-        let timerDuration;
-        switch (difficulty) {
-            case 'R1_HARD':
-                timerDuration = 25 * 60 * 1000; // 25 minutes
-                break;
-            case 'R1_MEDIUM':
-                timerDuration = 20 * 60 * 1000; // 20 minutes
-                break;
-            case 'R1_EASY':
-                timerDuration = 15 * 60 * 1000; // 15 minutes
-                break;
-            default:
-                timerDuration = 20 * 60 * 1000; // Default to 20 minutes
-        }
-
         try {
-            // Create the match record in the database
             const newMatch = await prisma.match.create({
-                data: {
-                    playerAId: player1.id,
-                    playerBId: player2.id, // Assuming 'Team-Bot' is a valid placeholder or special user ID
-                    problemId: question.id,
-                    status: 'ONGOING',
-                },
+                data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' },
             });
+
             const matchId = newMatch.id;
-            const matchStartTime = Date.now(); // FIX: Define a single start time
+            const startTime = Date.now();
+            const keys = getRedisKeys();
 
-            // Update state in Redis
-            const redisMulti = redis.multi();
-            redisMulti.zrem("round1:readyQueue", player1.id);
-            if (player2.id !== 'Team-Bot') {
-                redisMulti.zrem("round1:readyQueue", player2.id);
-            }
-            
-            player1.status = 'in-match';
-            redisMulti.hset("round1:participants", player1.id, JSON.stringify(player1));
-
-            if (player2.id !== 'Team-Bot') {
-                 const p2DataStr = await redis.hget("round1:participants", player2.id);
-                 if(p2DataStr) {
-                    const p2Data = JSON.parse(p2DataStr);
-                    p2Data.status = 'in-match';
-                    redisMulti.hset("round1:participants", player2.id, JSON.stringify(p2Data));
-                 }
-            }
-            
-            // FIX: Store startTime and duration in the match details
-            const matchDetails = { 
-                id: matchId, 
-                players: [player1.id, player2.id], 
-                problemId: question.id, 
-                startTime: matchStartTime, 
-                duration: timerDuration, // Store duration in ms
-                difficulty: difficulty 
+            const matchDetails = {
+                id: matchId, players: [player1.id, player2.id], problemId: question.id,
+                startTime, duration: timerDuration, difficulty
             };
-            redisMulti.hset("round1:matches", matchId, JSON.stringify(matchDetails));
+
+            const multi = redis.multi()
+                .zrem(keys.readyQueue, player1.id, player2.id)
+                .hset(keys.matches, matchId, JSON.stringify(matchDetails));
+
+            player1.status = 'in-match';
+            multi.hset(keys.participants, player1.id, JSON.stringify(player1));
             
-            await redisMulti.exec();
+            const p2DataStr = await redis.hget(keys.participants, player2.id);
+            if(p2DataStr) {
+                const p2Data = JSON.parse(p2DataStr);
+                p2Data.status = 'in-match';
+                multi.hset(keys.participants, player2.id, JSON.stringify(p2Data));
+            }
 
-            console.log(`[Match] Created in DB: ${matchId} between ${player1.id} and ${player2.id} with ${difficulty} difficulty`);
+            await multi.exec();
+            console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
 
-            // Start synchronized match timer
             startMatchTimer(matchId, timerDuration);
 
-            // Notify players
-            const questionData = { 
-                id: question.id, 
-                title: question.title, 
-                description: question.description, 
-                difficulty: question.difficulty,
-                constraints: Array.isArray(question.constraints) ? question.constraints : [],
-                boilerplate: question.boilerplate || {},
-                sampleTestCases: Array.isArray(question.sampleTestCases) 
-                    ? question.sampleTestCases 
-                    : question.sampleTestCases?.testCases || [],
-                hints: Array.isArray(question.hints) ? question.hints : [],
+            const questionData = {
+                id: question.id, title: question.title, description: question.description,
+                difficulty: question.difficulty, constraints: question.constraints || [],
+                boilerplate: question.boilerplate || {}, sampleTestCases: question.sampleTestCases?.testCases || [],
+                hints: question.hints || [],
             };
+
+            const matchPayload = { opponent: {}, question: questionData, startTime, duration: timerDuration };
+            
             const socket1 = io.sockets.sockets.get(player1.socketId);
+            const socket2 = io.sockets.sockets.get(JSON.parse(p2DataStr).socketId);
+
+            const matchRoom = `match:${matchId}`;
             if (socket1) {
-                // FIX: Send startTime and duration to the client for robust timer handling
-                socket1.emit('round1:matchFound', { 
-                    opponent: { id: player2.id, rank: player2.rank }, 
-                    question: questionData, 
-                    startTime: matchStartTime, 
-                    duration: timerDuration 
-                });
+                socket1.join(matchRoom);
+                socket1.emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
             }
-            if (player2.id !== 'Team-Bot') {
-                const p2Data = JSON.parse(await redis.hget("round1:participants", player2.id));
-                const socket2 = io.sockets.sockets.get(p2Data.socketId);
-                if (socket2) {
-                    // FIX: Send startTime and duration to the client for robust timer handling
-                    socket2.emit('round1:matchFound', { 
-                        opponent: { id: player1.id, rank: player1.rank }, 
-                        question: questionData, 
-                        startTime: matchStartTime, 
-                        duration: timerDuration 
-                    });
-                }
+            if (socket2) {
+                socket2.join(matchRoom);
+                socket2.emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
             }
+
         } catch (error) {
             console.error("[Create Match Error]", error);
         }
     };
 
-    /**
-     * Handles the end of a match. Should be exposed to be callable from an API route.
-     * @param {string} matchId The ID of the match that ended.
-     * @param {string} winnerId The user ID of the winning player.
-     */
     const handleMatchEnd = async (matchId, winnerId) => {
-        const matchStr = await redis.hget("round1:matches", matchId);
-        if (!matchStr) return;
+        const keys = getRedisKeys();
+        const matchStr = await redis.hget(keys.matches, matchId);
+        if (!matchStr) return; // Match already handled
         const match = JSON.parse(matchStr);
 
-        console.log(`[Match] Match ${matchId} ended. Winner: ${winnerId}.`);
+        console.log(`[Match End] Match ${matchId} ended. Winner: ${winnerId || 'Timeout'}.`);
 
-        // Clear match timer from Redis
-        await redis.hdel("round1:matchTimers", matchId);
-        console.log(`[Timer] Cleared timer for match ${matchId}`);
-
-        // Update match in DB
         await prisma.match.update({
             where: { id: matchId },
-            data: { status: 'COMPLETED', winnerId: winnerId },
+            data: { status: 'COMPLETED', winnerId },
         });
 
-        // Update both players to cooldown status and recalculate their ranks
+        const allUsers = await prisma.user.findMany({
+            select: { id: true, username: true, eventScore: true },
+            orderBy: [{ eventScore: 'desc' }, { username: 'asc' }]
+        });
+
         for (const playerId of match.players) {
-            if (playerId === 'Team-Bot') continue;
-            
-            const playerStr = await redis.hget("round1:participants", playerId);
+            const playerStr = await redis.hget(keys.participants, playerId);
             if (!playerStr) continue;
-
-            const player = JSON.parse(playerStr);
             
-            // Fetch updated user data to get new score
-            const updatedUserData = await prisma.user.findUnique({
-                where: { id: playerId },
-                select: { eventScore: true, username: true }
-            });
+            const player = JSON.parse(playerStr);
+            const userRank = allUsers.findIndex(u => u.id === playerId) + 1;
+            player.rank = userRank;
+            player.status = 'cooldown';
+            player.cooldownStartTime = Date.now();
+            await redis.hset(keys.participants, playerId, JSON.stringify(player));
 
-            if (updatedUserData) {
-                // Recalculate rank with updated score - get proper rank from all users
-                const allUsers = await prisma.user.findMany({
-                    select: { id: true, username: true, eventScore: true },
-                    orderBy: [
-                        { eventScore: 'desc' },
-                        { username: 'asc' }
-                    ]
+            const playerSocket = io.sockets.sockets.get(player.socketId);
+            if (playerSocket) {
+                playerSocket.emit('round1:matchEnd', {
+                    type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout',
+                    message: winnerId ? (playerId === winnerId ? 'You won!' : 'You lost.') : "Time's up!",
                 });
-                
-                const userRank = allUsers.findIndex(u => u.id === playerId) + 1;
-                player.rank = userRank;
-                player.originalScore = updatedUserData.eventScore || 0;
+                playerSocket.emit('round1:cooldown', {
+                    duration: COOLDOWN_DURATION,
+                    startTime: player.cooldownStartTime
+                });
             }
 
-            player.status = 'cooldown';
-            await redis.hset("round1:participants", playerId, JSON.stringify(player));
-            
-            const playerSocket = io.sockets.sockets.get(player.socketId);
-            if (playerSocket) playerSocket.emit('round1:cooldown');
-
-            // Set timeout to return them to the queue with updated rank
-            setTimeout(async () => {
-                const latestPlayerStr = await redis.hget("round1:participants", playerId);
-                if (!latestPlayerStr) return;
-
-                const latestPlayer = JSON.parse(latestPlayerStr);
-                if (latestPlayer.status === 'cooldown') {
-                    latestPlayer.status = 'waiting';
-                    latestPlayer.waitingSince = Date.now();
-                    await redis.hset("round1:participants", playerId, JSON.stringify(latestPlayer));
-                    await redis.zadd("round1:readyQueue", latestPlayer.rank, playerId);
-                    console.log(`[Cooldown] Player ${playerId} is back in the matchmaking queue with rank ${latestPlayer.rank}.`);
-                }
-            }, COOLDOWN_DURATION); // 2-minute cooldown
+            // FIXED: Start robust cooldown timer
+            await startCooldownTimer(playerId, COOLDOWN_DURATION, player.cooldownStartTime);
         }
-        
-        // Clean up match from Redis
-        await redis.hdel("round1:matches", matchId);
+
+        await redis.hdel(keys.matches, matchId);
+
+        if (!isFirstMatchCycleCompleted) {
+            isFirstMatchCycleCompleted = true;
+            clearInterval(matchmakingInterval);
+            matchmakingInterval = setInterval(runMatchmakingCycle, POST_MATCH_MATCHMAKING_INTERVAL);
+            console.log(`[Matchmaking] Switched to ${POST_MATCH_MATCHMAKING_INTERVAL / 60000} minute interval.`);
+            
+            // Notify all clients that first cycle is complete
+            io.emit('round1:firstCycleComplete');
+        }
+
+        // Broadcast updated participant list
+        await broadcastLobbyUpdate();
     };
 
-    /**
-     * Ends the entire round.
-     */
     const endRound = async () => {
         console.log("--- GLOBAL TIMER EXPIRED: ROUND 1 HAS ENDED ---");
-        clearInterval(matchmakingInterval);
-        clearTimeout(globalTimer);
         
-        // Clear all match timers from Redis
-        await redis.del("round1:matchTimers");
-        console.log(`[Timer] Cleared all match timers from Redis`);
+        // Clear all timers
+        if(matchmakingInterval) clearInterval(matchmakingInterval);
+        if(globalTimer) clearTimeout(globalTimer);
+        if(globalTimerInterval) clearInterval(globalTimerInterval);
+        if(matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
         
-        await redis.set("round1:status", "ended");
+        // Clear all cooldown timers
+        cooldownTimers.forEach(timer => {
+            if (timer.interval) clearInterval(timer.interval);
+            if (timer.timeout) clearTimeout(timer.timeout);
+        });
+        cooldownTimers.clear();
+        
+        await redis.set(getRedisKeys().status, "ended");
         io.emit('round1:ended');
     };
 
-    // --- Client → Server Event Handlers ---
-
-    /**
-     * Handle round1:getState - Get current game state
-     */
-    const handleGetState = async (payload, callback) => {
+    // FIXED: Enhanced getState with better cooldown handling
+    socket.on('round1:getState', async (payload, callback) => {
         const validation = validateUser();
-        if (validation.error) {
-            return callback?.({ success: false, error: validation.error });
-        }
+        if (validation.error) return callback?.({ success: false, error: validation.error });
         const { userId } = validation;
-
+        
         try {
             const keys = getRedisKeys();
-            const currentStatus = await redis.get(keys.status);
-            const participantStr = await redis.hget(keys.participants, userId);
             
+            // First, try to get user's participant data
+            let participantStr = await redis.hget(keys.participants, userId);
+            let participant = null;
+            
+            // If user not found in participants, check if they should be auto-joined
             if (!participantStr) {
-                return callback?.({ 
-                    success: false, 
-                    error: 'User not found in Round 1' 
-                });
+                console.log(`[GetState] User ${userId} not found in participants, attempting auto-join...`);
+                
+                // Check if round is active and user exists in database
+                const userData = await prisma.user.findUnique({ where: { id: validation.email } });
+                if (!userData) {
+                    return callback?.({ success: false, error: 'User not found in database.' });
+                }
+                
+                const currentStatus = await redis.get(keys.status);
+                if (currentStatus === "ended") {
+                    return callback?.({ success: false, error: 'Round 1 has ended.' });
+                }
+                
+                // Auto-join user to round (this handles refresh scenario)
+                const allUsers = await prisma.user.findMany({ orderBy: [{ eventScore: 'desc' }, { username: 'asc' }] });
+                const userRank = allUsers.findIndex(u => u.id === validation.email) + 1;
+
+                const newParticipant = {
+                    id: userId, socketId: socket.id, username: userData.username,
+                    rank: userRank, originalScore: userData.eventScore || 0,
+                    status: currentStatus === "running" ? 'waiting' : 'lobby', 
+                    joinedAt: new Date().toISOString()
+                };
+                
+                if (currentStatus === "running") {
+                    newParticipant.waitingSince = Date.now();
+                    await redis.zadd(keys.readyQueue, userRank, userId);
+                }
+                
+                await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
+                participant = newParticipant;
+                console.log(`[GetState] Auto-joined ${userId} to round with status: ${newParticipant.status}`);
+            } else {
+                participant = JSON.parse(participantStr);
+                // FIXED: Always update socket ID on reconnection to ensure proper communication
+                if (participant.socketId !== socket.id) {
+                    console.log(`[GetState] Updating socket ID for ${userId}: ${participant.socketId} -> ${socket.id}`);
+                    participant.socketId = socket.id;
+                    await redis.hset(keys.participants, userId, JSON.stringify(participant));
+                }
             }
 
-            const participant = JSON.parse(participantStr);
+            const allParticipantsData = await redis.hgetall(keys.participants);
+            const round1Participants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            const queueSize = await redis.zcard(keys.readyQueue);
+            const currentStatus = await redis.get(keys.status);
+            const isActive = currentStatus === "running";
             
-            let matchData = null;
-            let timeRemaining = 0;
-
-            // If user is in match, get match details
+            // Get round start time and calculate current time remaining
+            let roundStartTime = null;
+            let globalTimeRemaining = 0;
+            if (isActive) {
+                const startTimeStr = await redis.get(`${keys.status}:startTime`);
+                if (startTimeStr) {
+                    roundStartTime = parseInt(startTimeStr);
+                    const elapsed = Math.floor((Date.now() - roundStartTime) / 1000);
+                    globalTimeRemaining = Math.max(0, Math.floor(ROUND_DURATION / 1000) - elapsed);
+                    
+                    // Ensure timer broadcasts are running for active round
+                    if (!globalTimerInterval) {
+                        console.log(`[GetState] Starting timer broadcasts for active round`);
+                        startGlobalTimerBroadcast(roundStartTime);
+                        startMatchmakingCycleBroadcast();
+                    }
+                }
+            }
+            
+            // Handle reconnection for users already in matches
             if (participant.status === 'in-match') {
-                const allMatches = await redis.hgetall(keys.matches);
-                const matchEntry = Object.entries(allMatches).find(([, mStr]) => {
-                    const match = JSON.parse(mStr);
-                    return match.players.includes(userId);
-                });
-
-                if (matchEntry) {
-                    const [matchId, matchStr] = matchEntry;
-                    const match = JSON.parse(matchStr);
-                    
-                    // Get question details
-                    const question = await prisma.problem.findUnique({ 
-                        where: { id: match.problemId } 
-                    });
-                    
-                    if (question) {
-                        // FIX: Use startTime and duration for accurate timer calculation
-                        const timerDuration = match.duration || (20 * 60 * 1000);
-                        const elapsedTime = Date.now() - match.startTime;
-                        timeRemaining = Math.max(0, timerDuration - elapsedTime);
-                        
-                        const opponentId = match.players.find(pId => pId !== userId);
-                        
-                        matchData = {
-                            matchId,
-                            opponent: { id: opponentId },
-                            question: {
-                                id: question.id,
-                                title: question.title,
-                                description: question.description,
-                                difficulty: question.difficulty
-                            },
-                            startTime: match.startTime,
-                            duration: timerDuration,
-                            timer: timeRemaining / 1000, // For legacy compatibility
-                            difficulty: match.difficulty
-                        };
+                const matches = await redis.hgetall(keys.matches);
+                for (const matchId in matches) {
+                    const match = JSON.parse(matches[matchId]);
+                    if (match.players.includes(userId)) {
+                        socket.join(`match:${matchId}`);
+                        console.log(`[Reconnect] ${userId} rejoined match ${matchId}`);
+                        break;
                     }
                 }
             }
 
-            // Calculate global time remaining if round is active
-            let globalTimeRemaining = 0;
-            if (currentStatus === "running") {
-                // We'd need to store round start time in Redis to calculate this
-                // For now, return a placeholder
-                globalTimeRemaining = ROUND_DURATION / 1000; // TODO: Calculate actual remaining time
+            // BULLETPROOF: Simple cooldown handling - calculation only, no complex timers
+            let cooldownTimeRemaining = null;
+            
+            if (participant.status === 'cooldown') {
+                console.log(`[GetState] User ${userId} is in cooldown`);
+                
+                if (participant.cooldownStartTime) {
+                    const remaining = getCooldownTimeRemaining(participant.cooldownStartTime);
+                    console.log(`[GetState] Cooldown time remaining: ${remaining}s`);
+                    
+                    if (remaining > 0) {
+                        // Still in cooldown
+                        cooldownTimeRemaining = remaining;
+                        console.log(`[GetState] ✅ Returning ${remaining}s cooldown to frontend`);
+                    } else {
+                        // Cooldown expired
+                        console.log(`[GetState] Cooldown expired, updating to waiting`);
+                        participant.status = 'waiting';
+                        participant.waitingSince = Date.now();
+                        delete participant.cooldownStartTime;
+                        
+                        await redis.hset(keys.participants, userId, JSON.stringify(participant));
+                        
+                        const currentStatus = await redis.get(keys.status);
+                        if (currentStatus === "running") {
+                            await redis.zadd(keys.readyQueue, participant.rank, userId);
+                        }
+                        
+                        cooldownTimeRemaining = null;
+                        await broadcastLobbyUpdate();
+                    }
+                } else {
+                    // No start time - reset status
+                    console.warn(`[GetState] No cooldown start time, resetting status`);
+                    participant.status = isActive ? 'waiting' : 'lobby';
+                    if (isActive) {
+                        participant.waitingSince = Date.now();
+                        await redis.zadd(keys.readyQueue, participant.rank, userId);
+                    }
+                    await redis.hset(keys.participants, userId, JSON.stringify(participant));
+                    cooldownTimeRemaining = null;
+                }
             }
 
+            // Calculate next matchmaking cycle time
+            let nextMatchmakingCycle = null;
+            if (isActive) {
+                if (isFirstMatchCycleCompleted) {
+                    // Regular 3-minute cycles
+                    const cycleInterval = 3 * 60;
+                    const now = Math.floor(Date.now() / 1000);
+                    nextMatchmakingCycle = cycleInterval - (now % cycleInterval);
+                } else {
+                    // Initial 5-second cycles
+                    const cycleInterval = 5;
+                    const now = Math.floor(Date.now() / 1000);
+                    nextMatchmakingCycle = cycleInterval - (now % cycleInterval);
+                }
+            }
+
+            // FIXED: Always include comprehensive state information for frontend
             callback?.({
                 success: true,
                 participant,
-                status: currentStatus || "lobby",
-                isActive: currentStatus === "running",
-                match: matchData,
+                isActive,
+                round1Participants,
+                queueSize,
+                roundStartTime,
                 globalTimeRemaining,
-                message: 'Current state retrieved successfully'
+                cooldownTimeRemaining,
+                nextMatchmakingCycle,
+                isFirstCycle: !isFirstMatchCycleCompleted,
+                // Additional debugging info
+                currentStatus: await redis.get(keys.status),
+                userInQueue: await redis.zscore(keys.readyQueue, userId) !== null
             });
-
+            
+            // Broadcast updated lobby after potential auto-join
+            await broadcastLobbyUpdate();
+            
         } catch (error) {
             console.error('[GetState Error]', error);
-            callback?.({ success: false, error: 'Failed to retrieve game state' });
+            callback?.({ success: false, error: 'Server error fetching state.' });
         }
-    };
+    });
 
     socket.on('round1:join', async (payload, callback) => {
         const validation = validateUser();
         if (validation.error) {
+            console.error(`[Join] Validation failed: ${validation.error}`);
             return callback?.({ success: false, error: validation.error });
         }
         const { userId, email } = validation;
 
-        try {
-            // Check if round has already ended
-            const currentStatus = await redis.get(getRedisKeys().status);
-            if (currentStatus === "ended") {
-                return callback?.({ success: false, error: 'Round 1 has already ended' });
-            }
-
-            const keys = getRedisKeys();
-            const participantStr = await redis.hget(keys.participants, userId);
-            
-            if (participantStr) {
-                const participant = JSON.parse(participantStr);
-                participant.socketId = socket.id;
-                await redis.hset(keys.participants, userId, JSON.stringify(participant));
-                console.log(`[Connection] Player ${userId} reconnected.`);
-
-                // Handle reconnection during match
-                if (participant.status === 'in-match') {
-                    // Check if there's a disconnect timer in Redis
-                    const disconnectData = await redis.hget("round1:disconnectTimers", userId);
-                    if (disconnectData) {
-                        await redis.hdel("round1:disconnectTimers", userId);
-                        console.log(`[Connection] Canceled disconnect timer for ${userId}.`);
-                    }
-                    
-                    // Find the match and notify opponent about reconnection
-                    const allMatches = await redis.hgetall(keys.matches);
-                    const matchEntry = Object.entries(allMatches).find(([, mStr]) => JSON.parse(mStr).players.includes(userId));
-                    if (matchEntry) {
-                        const [matchId, matchStr] = matchEntry;
-                        const match = JSON.parse(matchStr);
-                        const opponentId = match.players.find(pId => pId !== userId);
-                        
-                        if (opponentId && opponentId !== 'Team-Bot') {
-                            const opponentStr = await redis.hget(keys.participants, opponentId);
-                            if(opponentStr) {
-                                const opponent = JSON.parse(opponentStr);
-                                const opponentSocket = io.sockets.sockets.get(opponent.socketId);
-                                if (opponentSocket) {
-                                    opponentSocket.emit('match:resume', { message: 'Opponent reconnected. Match resumed.' });
-                                }
-                            }
-                        }
-                        
-                        // Send current match info to reconnected player
-                        const question = await prisma.problem.findUnique({ where: { id: match.problemId } });
-                        if (question) {
-                            // FIX: Send full timer context on resume for robustness
-                            const timerDuration = match.duration || (20 * 60 * 1000);
-                            const elapsedTime = Date.now() - match.startTime;
-                            const remainingTime = Math.max(0, timerDuration - elapsedTime);
-                            
-                            socket.emit('match:resume', { 
-                                opponent: { id: opponentId }, 
-                                question: { 
-                                    id: question.id, 
-                                    title: question.title, 
-                                    description: question.description, 
-                                    difficulty: question.difficulty 
-                                }, 
-                                startTime: match.startTime,
-                                duration: timerDuration,
-                                timer: remainingTime / 1000 // For legacy compatibility
-                            });
-                        }
-                    }
-                } else {
-                    // Check if there's a disconnect timer in Redis for non-match situations
-                    const disconnectData = await redis.hget("round1:disconnectTimers", userId);
-                    if (disconnectData) {
-                        await redis.hdel("round1:disconnectTimers", userId);
-                        console.log(`[Connection] Canceled disconnect timer for ${userId}.`);
-                    }
-                }
-            } else {
-                // Fetch user data from database
-                const userData = await prisma.user.findUnique({
-                    where: { id: email },
-                    select: { id: true, username: true, role: true, eventScore: true }
-                });
-
-                if (!userData) {
-                    return callback?.({ success: false, error: 'User not found in database' });
-                }
-
-                // Calculate proper ranking based on score and username
-                // Higher scores get better (lower) rank numbers
-                // For same scores, alphabetical username order is used for tie-breaking
-                const score = userData.eventScore || 0;
-                const username = userData.username || 'Anonymous';
-                
-                // Get all users to calculate proper rank
-                const allUsers = await prisma.user.findMany({
-                    select: { id: true, username: true, eventScore: true },
-                    orderBy: [
-                        { eventScore: 'desc' }, // Higher score first
-                        { username: 'asc' }     // Then alphabetical for ties
-                    ]
-                });
-                
-                // Find actual rank position (1-based)
-                const userRank = allUsers.findIndex(u => u.id === email) + 1;
-
-                const newParticipant = { 
-                    id: userId, 
-                    socketId: socket.id, 
-                    username: username,
-                    rank: userRank,
-                    originalScore: score,
-                    status: 'lobby',
-                    joinedAt: new Date().toISOString()
-                };
-                await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
-                console.log(`[Lobby] User ${userId} (Rank: ${newParticipant.rank}) joined.`);
-            }
-
-            // Set user presence
-            await redis.setex(getRedisKeys(userId).presence, 3600, 'online');
-
-            await broadcastLobbyUpdate();
-            
-            callback?.({ 
-                success: true, 
-                message: 'Successfully joined Round 1 lobby'
-            });
-
-        } catch (error) {
-            console.error('[Join Error]', error);
-            callback?.({ success: false, error: 'Failed to join Round 1 lobby' });
+        console.log(`[Join] User ${userId} attempting to join round 1`);
+        
+        const keys = getRedisKeys();
+        const currentStatus = await redis.get(keys.status);
+        console.log(`[Join] Current round status: ${currentStatus}`);
+        
+        if (currentStatus === "ended") {
+            return callback?.({ success: false, error: 'Round 1 has ended.' });
         }
+
+        if (disconnectTimers.has(userId)) {
+            clearTimeout(disconnectTimers.get(userId));
+            disconnectTimers.delete(userId);
+            console.log(`[Reconnect] Cleared disconnect timer for ${userId}.`);
+        }
+
+        const participantStr = await redis.hget(keys.participants, userId);
+        if (participantStr) {
+            const participant = JSON.parse(participantStr);
+            participant.socketId = socket.id;
+            await redis.hset(keys.participants, userId, JSON.stringify(participant));
+            console.log(`[Connection] ${userId} reconnected with status: ${participant.status}`);
+
+            if (participant.status === 'in-match') {
+                const matches = await redis.hgetall(keys.matches);
+                for (const matchId in matches) {
+                    const match = JSON.parse(matches[matchId]);
+                    if (match.players.includes(userId)) {
+                        socket.join(`match:${matchId}`);
+                        console.log(`[Reconnect] ${userId} rejoined match ${matchId}`);
+                        
+                        // Send them back to the match with current data
+                        const problem = await prisma.problem.findUnique({ where: { id: match.problemId } });
+                        if (problem) {
+                            const questionData = {
+                                id: problem.id, title: problem.title, description: problem.description,
+                                difficulty: problem.difficulty, constraints: problem.constraints || [],
+                                boilerplate: problem.boilerplate || {}, sampleTestCases: problem.sampleTestCases?.testCases || [],
+                                hints: problem.hints || [],
+                            };
+                            
+                            const opponentId = match.players.find(pId => pId !== userId);
+                            const matchPayload = { 
+                                opponent: { id: opponentId }, 
+                                question: questionData, 
+                                startTime: match.startTime, 
+                                duration: match.duration 
+                            };
+                            
+                            // Emit matchFound to redirect them back to the match
+                            socket.emit('round1:matchFound', matchPayload);
+                        }
+                        break;
+                    }
+                }
+            }
+            // FIXED: Restart cooldown timer for reconnected users in cooldown
+            else if (participant.status === 'cooldown' && participant.cooldownStartTime) {
+                const remaining = getCooldownTimeRemaining(participant.cooldownStartTime);
+                if (remaining > 0 && !cooldownTimers.has(userId)) {
+                    console.log(`[Reconnect] Restarting cooldown timer for ${userId}: ${remaining}s remaining`);
+                    await startCooldownTimer(userId, COOLDOWN_DURATION, participant.cooldownStartTime);
+                }
+            }
+        } else {
+            const userData = await prisma.user.findUnique({ where: { id: email } });
+            if (!userData) return callback?.({ success: false, error: 'User not found.' });
+
+            const allUsers = await prisma.user.findMany({ orderBy: [{ eventScore: 'desc' }, { username: 'asc' }] });
+            const userRank = allUsers.findIndex(u => u.id === email) + 1;
+
+            const newParticipant = {
+                id: userId, socketId: socket.id, username: userData.username,
+                rank: userRank, originalScore: userData.eventScore || 0,
+                status: 'lobby', joinedAt: new Date().toISOString()
+            };
+            await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
+            console.log(`[Lobby] ${userId} (Rank: ${userRank}) joined.`);
+        }
+        await broadcastLobbyUpdate();
+        callback?.({ success: true, message: 'Joined Round 1 lobby.' });
     });
 
     socket.on('round1:ready', async (payload, callback) => {
         const validation = validateUser();
-        if (validation.error) {
-            return callback?.({ success: false, error: validation.error });
+        if (validation.error) return callback?.({ success: false, error: validation.error });
+        
+        // Check admin status from database only (more reliable)
+        const userData = await prisma.user.findUnique({ where: { id: validation.email } });
+        if (!userData) {
+            return callback?.({ success: false, error: 'User not found in database.' });
         }
-        const { userId, email } = validation;
-
-        try {
-            // Check if user is admin
-            const userData = await prisma.user.findUnique({
-                where: { id: email },
-                select: { role: true }
-            });
-
-            if (!userData || userData.role !== 'ADMIN') {
-                return callback?.({ success: false, error: 'Only admins can start Round 1' });
-            }
-
-            const keys = getRedisKeys();
-            const currentStatus = await redis.get(keys.status);
-            if (currentStatus === "running") {
-                console.warn("[Admin] Round is already running.");
-                return callback?.({ success: false, error: 'Round 1 is already running' });
-            }
-
-            // Check database status
-            const round1DB = await prisma.round.findUnique({
-                where: { roundNumber: 1 }
-            });
-
-            if (!round1DB || round1DB.status !== 'LOBBY') {
-                return callback?.({ 
-                    success: false, 
-                    error: `Round 1 is not in LOBBY status. Current status: ${round1DB?.status || 'Not found'}` 
-                });
-            }
-
-            console.log("--- ADMIN: Round 1 is starting now! ---");
-            
-            // Clear previous round data for a clean start (but keep participants)
-            await redis.del(keys.readyQueue, keys.matches);
-            await redis.set(keys.status, "running");
-            
-            // Update database status
-            await prisma.round.update({
-                where: { roundNumber: 1 },
-                data: { status: 'IN_PROGRESS' }
-            });
-
-            // Store round start time for global timer calculation
-            const startTime = Date.now();
-            await redis.setex(`round${ROUND_NUMBER}:startTime`, 3600, startTime.toString());
-
-            globalTimer = setTimeout(endRound, ROUND_DURATION);
-
-            // Get all current participants and move lobby participants to waiting
-            const allParticipants = await redis.hgetall(keys.participants);
-            const multi = redis.multi();
-            let queueCount = 0;
-            for (const userId in allParticipants) {
-                const p = JSON.parse(allParticipants[userId]);
-                if (p.status === 'lobby') {
-                    p.status = 'waiting';
-                    p.waitingSince = Date.now();
-                    multi.hset(keys.participants, userId, JSON.stringify(p));
-                    multi.zadd(keys.readyQueue, p.rank, userId);
-                    queueCount++;
-                }
-            }
-            await multi.exec();
-            console.log(`[Queue] Moved ${queueCount} players to the matchmaking queue.`);
-
-            matchmakingInterval = setInterval(runMatchmakingCycle, MATCHMAKING_INTERVAL);
-            
-            // Notify all clients that the round has started
-            io.emit('round1:started', {
-                message: 'Round 1 has started! Matchmaking in progress...',
-                duration: ROUND_DURATION / 1000,
-                startTime
-            });
-
-            callback?.({ 
-                success: true, 
-                message: `Round 1 started with ${queueCount} players`,
-                duration: ROUND_DURATION / 1000
-            });
-
-        } catch (error) {
-            console.error('[Ready Error]', error);
-            callback?.({ success: false, error: 'Failed to start Round 1' });
+        
+        if (userData.role !== 'ADMIN') {
+            console.log(`Non-admin user ${validation.email} tried to start round. User role: ${userData.role}`);
+            return callback?.({ success: false, error: 'Unauthorized - Admin access required.' });
         }
+
+        const keys = getRedisKeys();
+        if (await redis.get(keys.status) === 'running') return callback?.({ success: false, error: 'Round already running.' });
+
+        console.log(`--- ADMIN (${validation.email}): Round 1 is starting! ---`);
+        await redis.set(keys.status, "running");
+        
+        // Store round start time for global timer
+        const roundStartTime = Date.now();
+        await redis.set(`${keys.status}:startTime`, roundStartTime);
+        
+        // FIXED: Properly update all participants from lobby to waiting status
+        const participants = await redis.hgetall(keys.participants);
+        const multi = redis.multi();
+        let updatedCount = 0;
+        
+        Object.values(participants).forEach(pStr => {
+            const p = JSON.parse(pStr);
+            if (p.status === 'lobby') {
+                p.status = 'waiting';
+                p.waitingSince = Date.now();
+                multi.hset(keys.participants, p.id, JSON.stringify(p));
+                multi.zadd(keys.readyQueue, p.rank, p.id);
+                updatedCount++;
+                console.log(`[Round Start] Updated ${p.id} from lobby to waiting`);
+            }
+        });
+        
+        await multi.exec();
+        console.log(`[Round Start] Updated ${updatedCount} participants from lobby to waiting status`);
+
+        isFirstMatchCycleCompleted = false;
+        matchmakingInterval = setInterval(runMatchmakingCycle, INITIAL_MATCHMAKING_INTERVAL);
+        globalTimer = setTimeout(endRound, ROUND_DURATION);
+        
+        // Start all backend timer broadcasts
+        startGlobalTimerBroadcast(roundStartTime);
+        startMatchmakingCycleBroadcast();
+        
+        // FIXED: Broadcast round start and updated participant list
+        io.emit('round1:started', { roundStartTime, roundDuration: ROUND_DURATION });
+        
+        // Broadcast updated participant list to ensure all clients see status changes
+        await broadcastLobbyUpdate();
+        
+        callback?.({ success: true, message: 'Round 1 started successfully.' });
     });
 
     socket.on('disconnect', async () => {
@@ -863,233 +885,72 @@ export const round1Handler = (io, socket) => {
         if (validation.error) return;
         const { userId } = validation;
 
-        try {
-            const keys = getRedisKeys();
-            const participantStr = await redis.hget(keys.participants, userId);
-            if (!participantStr) return;
+        const keys = getRedisKeys();
+        const participantStr = await redis.hget(keys.participants, userId);
+        if (!participantStr) return;
+        
+        const participant = JSON.parse(participantStr);
+        console.log(`[Disconnect] ${userId} disconnected.`);
 
-            const user = JSON.parse(participantStr);
-            console.log(`[Connection] User ${user.id} disconnected.`);
-
-            if (user.status === 'in-match') {
-                const allMatches = await redis.hgetall(keys.matches);
-                const matchEntry = Object.entries(allMatches).find(([, mStr]) => JSON.parse(mStr).players.includes(user.id));
-                if (!matchEntry) return;
-
-                const [matchId, matchStr] = matchEntry;
-                const match = JSON.parse(matchStr);
-                const opponentId = match.players.find(pId => pId !== user.id);
-
-                // Add grace period before notifying opponent about disconnection
-                // This prevents false alerts during page refreshes
-                const gracePeriodTimer = setTimeout(async () => {
-                    // Check if user is still disconnected after grace period
-                    const disconnectData = await redis.hget("round1:disconnectTimers", user.id);
-                    if (disconnectData) {
-                        // Notify opponent about the disconnection and pause the match
-                        if (opponentId && opponentId !== 'Team-Bot') {
-                            const opponentStr = await redis.hget(keys.participants, opponentId);
-                            if(opponentStr) {
-                                const opponent = JSON.parse(opponentStr);
-                                const opponentSocket = io.sockets.sockets.get(opponent.socketId);
-                                if (opponentSocket) {
-                                    opponentSocket.emit('match:pause', { message: 'Opponent disconnected. Match paused for 1 minute.' });
-                                }
-                            }
-                        }
-                    }
-                }, 5000); // 5 second grace period
-
-                // Set 1-minute timer for reconnection
-                const mainTimer = setTimeout(async () => {
-                    console.log(`[Disconnection] Player ${user.id} did not reconnect. Opponent ${opponentId} wins.`);
-                    await handleMatchEnd(matchId, opponentId);
-                    await redis.hdel("round1:disconnectTimers", user.id);
-                }, DISCONNECT_TIMEOUT);
-                
-                // Store disconnect timer info in Redis
-                await redis.hset("round1:disconnectTimers", user.id, JSON.stringify({
-                    matchId,
-                    opponentId,
-                    disconnectTime: Date.now(),
-                    graceEndTime: Date.now() + 5000,
-                    disconnectEndTime: Date.now() + DISCONNECT_TIMEOUT
-                }));
-            } else {
-                // If not in match, remove from participants and queue
-                await redis.hdel(keys.participants, user.id);
-                await redis.zrem(keys.readyQueue, user.id);
-                await broadcastLobbyUpdate();
-            }
-
-            // Remove user presence
-            await redis.del(getRedisKeys(userId).presence);
-
-        } catch (error) {
-            console.error('[Disconnect Error]', error);
-        }
-    });
-
-    // Event Listeners
-    socket.on('round1:getState', handleGetState);
-    socket.on('round1:getTimerState', async (payload, callback) => {
-        const validation = validateUser();
-        if (validation.error) {
-            return callback?.({ success: false, error: validation.error });
-        }
-        const { userId } = validation;
-
-        try {
-            // Find the user's current match
-            const allMatches = await redis.hgetall("round1:matches");
-            let userMatch = null;
-            let matchId = null;
-
-            for (const [id, matchStr] of Object.entries(allMatches)) {
-                const match = JSON.parse(matchStr);
+        if (participant.status === 'in-match') {
+            const matches = await redis.hgetall(keys.matches);
+            for (const matchId in matches) {
+                const match = JSON.parse(matches[matchId]);
                 if (match.players.includes(userId)) {
-                    userMatch = match;
-                    matchId = id;
-                    break;
-                }
-            }
-
-            if (userMatch) {
-                // Check if timer exists in Redis
-                const timerData = await redis.hget("round1:matchTimers", matchId);
-                if (timerData || userMatch.startTime) {
-                    // Calculate remaining time based on start time and duration
-                    const elapsed = Date.now() - userMatch.startTime;
-                    const duration = userMatch.duration || (20 * 60 * 1000);
-                    const remaining = Math.max(0, Math.floor((duration - elapsed) / 1000));
+                    const opponentId = match.players.find(pId => pId !== userId);
+                    console.log(`[Disconnect] Starting ${DISCONNECT_TIMEOUT/1000}s timer for ${userId}.`);
                     
-                    socket.emit('round1:timerUpdate', { 
-                        timeRemaining: remaining,
-                        matchId: matchId 
-                    });
-                    console.log(`[Timer Sync] Sent current timer state: ${remaining}s remaining for ${userId}`);
+                    const timeoutId = setTimeout(() => {
+                        console.log(`[Disconnect] Timer expired for ${userId}. ${opponentId} wins.`);
+                        handleMatchEnd(matchId, opponentId);
+                        disconnectTimers.delete(userId);
+                    }, DISCONNECT_TIMEOUT);
+                    disconnectTimers.set(userId, timeoutId);
+                    return;
                 }
             }
-        } catch (error) {
-            console.error('[Timer State Error]', error);
         }
+        // If not in match, or no match found, remove them cleanly.
+        await redis.hdel(keys.participants, userId);
+        await redis.zrem(keys.readyQueue, userId);
+        
+        // FIXED: Clear cooldown timer if user disconnects during cooldown
+        if (cooldownTimers.has(userId)) {
+            const timer = cooldownTimers.get(userId);
+            if (timer.interval) clearInterval(timer.interval);
+            if (timer.timeout) clearTimeout(timer.timeout);
+            cooldownTimers.delete(userId);
+            console.log(`[Disconnect] Cleared cooldown timer for ${userId}`);
+        }
+        
+        await broadcastLobbyUpdate();
     });
+
     socket.on('round1:reset', async (payload, callback) => {
         const validation = validateUser();
-        if (validation.error) {
-            return callback?.({ success: false, error: validation.error });
+        if (validation.error) return callback?.({ success: false, error: validation.error });
+
+        // Check admin status from database only (more reliable)
+        const userData = await prisma.user.findUnique({ where: { id: validation.email } });
+        if (!userData) {
+            return callback?.({ success: false, error: 'User not found in database.' });
+        }
+        
+        if (userData.role !== 'ADMIN') {
+            console.log(`Non-admin user ${validation.email} tried to reset round. User role: ${userData.role}`);
+            return callback?.({ success: false, error: 'Unauthorized - Admin access required.' });
         }
 
-        try {
-            // Check if user is admin
-            const userData = await prisma.user.findUnique({
-                where: { id: validation.email },
-                select: { role: true }
-            });
-
-            if (!userData || userData.role !== 'ADMIN') {
-                return callback?.({ success: false, error: 'Only admins can reset Round 1' });
-            }
-
-            const success = await resetRoundState();
-            callback?.({ 
-                success, 
-                message: success ? 'Round 1 reset successfully' : 'Failed to reset Round 1'
-            });
-
-            if (success) {
-                io.emit('round1:reset', { message: 'Round 1 has been reset by admin' });
-            }
-
-        } catch (error) {
-            console.error('[Reset Error]', error);
-            callback?.({ success: false, error: 'Failed to reset Round 1' });
+        const success = await resetRoundState();
+        if (success) {
+            io.emit('round1:reset');
+            callback?.({ success: true, message: 'Round 1 reset successfully.' });
+        } else {
+            callback?.({ success: false, error: 'Failed to reset round.' });
         }
     });
 
-    // Store the handleMatchEnd function globally so it can be accessed from external routes
     round1MatchEndHandler = handleMatchEnd;
 };
 
-// Export the match end handler for external use
 export const getRound1MatchEndHandler = () => round1MatchEndHandler;
-
-// Redis-based timer cleanup function
-export const cleanupExpiredTimers = async () => {
-    try {
-        const keys = getRedisKeys();
-        const allDisconnectTimers = await redis.hgetall(keys.disconnectTimers);
-        const now = Date.now();
-        
-        for (const [userId, timerDataStr] of Object.entries(allDisconnectTimers)) {
-            const timerData = JSON.parse(timerDataStr);
-            if (now > timerData.disconnectEndTime) {
-                // Timer expired, handle match end
-                console.log(`[Cleanup] Disconnect timer expired for ${userId}, opponent ${timerData.opponentId} wins`);
-                if (round1MatchEndHandler) {
-                    await round1MatchEndHandler(timerData.matchId, timerData.opponentId);
-                }
-                await redis.hdel(keys.disconnectTimers, userId);
-            }
-        }
-    } catch (error) {
-        console.error('[Timer Cleanup Error]', error);
-    }
-};
-
-// Export helper function to check round status
-export const getRound1Status = async () => {
-    try {
-        const keys = getRedisKeys();
-        const currentStatus = await redis.get(keys.status);
-        const allParticipants = await redis.hgetall(keys.participants);
-        
-        const participants = Object.entries(allParticipants).map(([uid, value]) => ({
-            userId: uid,
-            ...JSON.parse(value)
-        }));
-
-        const lobbyParticipants = participants.filter(p => p.status === 'lobby');
-        const inMatchParticipants = participants.filter(p => p.status === 'in-match');
-        const waitingParticipants = participants.filter(p => p.status === 'waiting');
-
-        let timeRemaining = 0;
-        if (currentStatus === "running") {
-            try {
-                const startTimeStr = await redis.get(`round${ROUND_NUMBER}:startTime`);
-                if (startTimeStr) {
-                    const startTime = parseInt(startTimeStr);
-                    const elapsed = Date.now() - startTime;
-                    timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
-                }
-            } catch (error) {
-                console.error('Error calculating time remaining:', error);
-            }
-        }
-
-        return {
-            isActive: currentStatus === "running",
-            status: currentStatus || "lobby",
-            participants,
-            lobbyParticipants,
-            inMatchParticipants,
-            waitingParticipants,
-            totalParticipants: participants.length,
-            timeRemaining: timeRemaining / 1000, // Return in seconds
-            duration: ROUND_DURATION / 1000
-        };
-    } catch (error) {
-        console.error('Error getting Round 1 status:', error);
-        return {
-            isActive: false,
-            status: "lobby",
-            participants: [],
-            lobbyParticipants: [],
-            inMatchParticipants: [],
-            waitingParticipants: [],
-            totalParticipants: 0,
-            timeRemaining: 0,
-            duration: ROUND_DURATION / 1000
-        };
-    }
-};
