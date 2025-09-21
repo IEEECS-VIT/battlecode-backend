@@ -131,9 +131,9 @@ export const round1Handler = (io, socket) => {
         }
 
         let timerDuration;
-        if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
-        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
-        else timerDuration = 15 * 60 * 1000;
+        if (difficulty === 'R1_HARD') timerDuration = 3 * 60 * 1000;
+        else if (difficulty === 'R1_MEDIUM') timerDuration = 2 * 60 * 1000;
+        else timerDuration = 1.5 * 60 * 1000;
 
         try {
             const newMatch = await prisma.match.create({
@@ -153,8 +153,7 @@ export const round1Handler = (io, socket) => {
                 .exec();
 
             const matchRoom = `match:${matchId}`;
-            const questionData = { id: question.id, title: question.title, description: question.description };
-            const matchPayload = { question: questionData, startTime, duration: timerDuration };
+            const matchPayload = { question: question, startTime, duration: timerDuration };
             
             io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
             io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
