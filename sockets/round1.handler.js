@@ -13,7 +13,7 @@ const JANITOR_INTERVAL = 5000;
 let globalTimer = null;
 let globalTimerInterval = null;
 let matchmakingInterval = null;
-let isFirstMatchCycleCompleted = false;
+let matchmakingCycleInterval = null; // Re-added for matchmaking timer broadcast
 let round1MatchEndHandler = null;
 
 const getRedisKeys = () => ({
@@ -72,6 +72,16 @@ export const round1Handler = (io, socket) => {
         } catch (error) {
             console.error('[Broadcast Error]', error);
         }
+    };
+    
+    // CHANGE: Re-added matchmaking cycle broadcast
+    const startMatchmakingCycleBroadcast = () => {
+        if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+        matchmakingCycleInterval = setInterval(() => {
+            const now = Math.floor(Date.now() / 1000);
+            const nextCycle = Math.floor((MATCHMAKING_INTERVAL / 1000) - (now % (MATCHMAKING_INTERVAL / 1000)));
+            io.emit('round1:matchmakingCycle', { nextCycle });
+        }, 1000);
     };
 
     const handleMatchEnd = async (matchId, winnerId) => {
@@ -222,7 +232,8 @@ export const round1Handler = (io, socket) => {
         if(matchmakingInterval) clearInterval(matchmakingInterval);
         if(globalTimer) clearTimeout(globalTimer);
         if(globalTimerInterval) clearInterval(globalTimerInterval);
-        matchmakingInterval = globalTimer = globalTimerInterval = null;
+        if(matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+        matchmakingInterval = globalTimer = globalTimerInterval = matchmakingCycleInterval = null;
         await redis.set(getRedisKeys().status, "ended");
         await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
         io.emit('round1:ended');
@@ -234,8 +245,8 @@ export const round1Handler = (io, socket) => {
             if(matchmakingInterval) clearInterval(matchmakingInterval);
             if(globalTimer) clearTimeout(globalTimer);
             if(globalTimerInterval) clearInterval(globalTimerInterval);
-            matchmakingInterval = globalTimer = globalTimerInterval = null;
-            isFirstMatchCycleCompleted = false;
+            if(matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+            matchmakingInterval = globalTimer = globalTimerInterval = matchmakingCycleInterval = null;
             
             const keys = Object.values(getRedisKeys());
             await redis.del(keys);
@@ -319,6 +330,7 @@ export const round1Handler = (io, socket) => {
         }, 1000);
 
         matchmakingInterval = setInterval(runMatchmakingCycle, MATCHMAKING_INTERVAL);
+        startMatchmakingCycleBroadcast(); // CHANGE: Start the cycle timer broadcast
         runMatchmakingCycle();
         
         io.emit('round1:started', { roundStartTime, roundDuration: ROUND_DURATION });
@@ -353,10 +365,6 @@ export const round1Handler = (io, socket) => {
                 }
             }
         } else {
-             // For users not in a match, we no longer delete them immediately.
-             // This prevents state loss on a simple refresh.
-             // Their state is preserved in Redis, and their socket ID will be updated
-             // by the 'getState' handler upon their reconnection.
              console.log(`[Disconnect] User ${userId} state preserved for refresh/reconnect.`);
         }
     });
@@ -369,16 +377,14 @@ export const round1Handler = (io, socket) => {
 
         try {
             const keys = getRedisKeys();
-            let participantStr = await redis.hget(keys.participants, userId);
+            const currentStatus = await redis.get(keys.status);
+            const allParticipantsData = await redis.hgetall(keys.participants);
+            const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            let participant = allParticipants.find(p => p.id === userId);
             
-            if (!participantStr) {
-                // Also return the full participant list for a non-participant
-                const allParticipantsData = await redis.hgetall(keys.participants);
-                const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            if (!participant) {
                 return callback?.({ success: true, participant: null, allParticipants });
             }
-            
-            let participant = JSON.parse(participantStr);
 
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
@@ -386,7 +392,7 @@ export const round1Handler = (io, socket) => {
                 delete participant.cooldownEndTime;
                 await redis.hset(keys.participants, userId, JSON.stringify(participant));
                 await redis.zadd(keys.readyQueue, participant.rank, userId);
-                await broadcastLobbyUpdate(); // Inform others that this user is now waiting
+                await broadcastLobbyUpdate();
             }
             
             if (participant.socketId !== socket.id) {
@@ -415,15 +421,18 @@ export const round1Handler = (io, socket) => {
                 }
             }
 
-            const currentStatus = await redis.get(keys.status);
             const startTimeStr = await redis.get(keys.startTime);
             const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
             const globalTimeRemaining = roundStartTime ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) : 0;
             
-            const allParticipantsData = await redis.hgetall(keys.participants);
-            const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            // CHANGE: Include next matchmaking cycle time in getState response
+            let nextMatchmakingCycle = null;
+            if (currentStatus === "running") {
+                const now = Math.floor(Date.now() / 1000);
+                nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL / 1000) - (now % (MATCHMAKING_INTERVAL / 1000)));
+            }
             
-            callback?.({ success: true, participant, isActive: currentStatus === "running", globalTimeRemaining, allParticipants });
+            callback?.({ success: true, participant, isActive: currentStatus === "running", globalTimeRemaining, allParticipants, nextMatchmakingCycle });
         } catch (err) {
             console.error('[GetState Error]', err);
             callback?.({ success: false, error: 'Server error fetching state.' });
