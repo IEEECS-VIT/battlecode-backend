@@ -27,24 +27,25 @@ export const round2Handler = (io, socket) => {
     const handleLobbyJoin=async (callback)=>{
       try{
         const userId=socket.user.id;
+        const username = socket.user.user_metadata?.full_name || socket.user.email;
         const lobbyId="round2:lobby"; //defining sorted redis set for the lobby
 
         //fetching round 1 scores from redis
         const round1Score=await redis.hget("round1:scores",userId);
         if(!round1Score){
-          return callback({success:false,message:"Round 1 score of player not found."});
+          return callback({success:false,error:"Round 1 score of player not found."});
         }
 
         await redis.zadd(lobbyId, { score: round1Score, value: userId }); //store users on the basis of round1 score in the ss
         socket.join(lobbyId); 
         socket.join(userId); //join personal room for targeted emits
-        io.to(lobbyId).emit("Player joined",userId);
+        io.to(lobbyId).emit("Player joined",{userId,username});
         await redis.set(`round2:lastActive:${userId}`, Date.now()); 
 
         callback({success:true});
       }catch(err){
         console.error("Error in handleLobbyJoin handler",err);
-        callback({success:false,message:"Server error"});
+        callback({success:false,error:"Server error"});
 
       }
     }
@@ -86,7 +87,7 @@ export const round2Handler = (io, socket) => {
           else challengers.push(playerId);
         }
 
-        io.to(lobbyId).emit("round2:start",{
+        io.to(lobbyId).emit("round2:started",{
           message:"Round 2 starts now. All the best players.",
           endTime,
           elites,
@@ -483,7 +484,7 @@ export const round2Handler = (io, socket) => {
 
           const scores = await redis.hgetall(`round2:scores:${key}`);
           const challengerScore = parseInt(scores[challengerId] || 0, 10);
-          const eliteScore = parseInt(scores[eliteId] || 0, 10);
+          const eliteScore = parseInt(scores[eliteId] || 0, 10);  
 
           const winner = challengerScore > eliteScore ? challengerId : eliteId;
 
@@ -534,7 +535,6 @@ export const round2Handler = (io, socket) => {
     socket.on("round2:challengeAccept",handleChallengeAccept);
   };
 
-//TO DO: submit logic me integrate first submit + scoring + leaderboard update
 
 
 
