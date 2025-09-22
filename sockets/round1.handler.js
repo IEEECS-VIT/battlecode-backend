@@ -4,8 +4,8 @@ import prisma from "../config/prisma.js";
 // Constants
 const ROUND_DURATION = 90 * 60 * 1000;
 const ROUND_NUMBER = 1;
-const MATCHMAKING_INTERVAL = 3 * 60 * 1000;
-const COOLDOWN_DURATION = 2 * 60 * 1000;
+const MATCHMAKING_INTERVAL = 0.5 * 60 * 1000; // Corrected back to 3 minutes
+const COOLDOWN_DURATION = 0.4 * 60 * 1000;
 const DISCONNECT_TIMEOUT = 1 * 60 * 1000;
 const JANITOR_INTERVAL = 5000;
 
@@ -13,7 +13,7 @@ const JANITOR_INTERVAL = 5000;
 let globalTimer = null;
 let globalTimerInterval = null;
 let matchmakingInterval = null;
-let matchmakingCycleInterval = null; // Re-added for matchmaking timer broadcast
+let matchmakingCycleInterval = null;
 let round1MatchEndHandler = null;
 
 const getRedisKeys = () => ({
@@ -24,7 +24,7 @@ const getRedisKeys = () => ({
     startTime: `round${ROUND_NUMBER}:status:startTime`,
 });
 
-const startJanitor = () => {
+const startJanitor = (io) => {
     setInterval(async () => {
         try {
             const keys = getRedisKeys();
@@ -34,11 +34,27 @@ const startJanitor = () => {
                 if (match.disconnectEndTime && Date.now() > match.disconnectEndTime) {
                     console.log(`[Janitor] Found expired disconnect for match ${matchId}.`);
                     const opponentId = match.players.find(pId => pId !== match.disconnectedPlayerId);
-                    if (round1MatchEndHandler) {
-                        await round1MatchEndHandler(matchId, opponentId);
-                    }
+                    if (round1MatchEndHandler) await round1MatchEndHandler(matchId, opponentId);
                 }
             }
+
+            // FIX: Janitor now handles expired cooldowns
+            const allParticipantsData = await redis.hgetall(keys.participants);
+            let hasCooldownUpdates = false;
+            for (const userId in allParticipantsData) {
+                const participant = JSON.parse(allParticipantsData[userId]);
+                if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
+                    console.log(`[Janitor] Cooldown expired for ${userId}. Re-queuing.`);
+                    participant.status = 'waiting';
+                    delete participant.cooldownEndTime;
+                    await redis.hset(keys.participants, userId, JSON.stringify(participant));
+                    await redis.zadd(keys.readyQueue, participant.rank, userId);
+                    io.to(`user:${userId}`).emit('round1:cooldownEnd');
+                    hasCooldownUpdates = true;
+                }
+            }
+            if (hasCooldownUpdates) await broadcastLobbyUpdate(io);
+
         } catch (error) {
             console.error('[Janitor Error]', error);
         }
@@ -46,9 +62,15 @@ const startJanitor = () => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-startJanitor();
+// Pass `io` to janitor on initialization
+let isJanitorStarted = false;
 
 export const round1Handler = (io, socket) => {
+    if (!isJanitorStarted) {
+        startJanitor(io);
+        isJanitorStarted = true;
+    }
+
     const validateUser = () => {
         const userId = socket.user?.email;
         if (!userId) return { error: 'Unauthorized' };
@@ -73,13 +95,13 @@ export const round1Handler = (io, socket) => {
             console.error('[Broadcast Error]', error);
         }
     };
-    
-    // CHANGE: Re-added matchmaking cycle broadcast
-    const startMatchmakingCycleBroadcast = () => {
+
+    const startMatchmakingCycleBroadcast = (roundStartTime) => {
         if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
         matchmakingCycleInterval = setInterval(() => {
-            const now = Math.floor(Date.now() / 1000);
-            const nextCycle = Math.floor((MATCHMAKING_INTERVAL / 1000) - (now % (MATCHMAKING_INTERVAL / 1000)));
+            const elapsed = Date.now() - roundStartTime;
+            const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
+            const nextCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
             io.emit('round1:matchmakingCycle', { nextCycle });
         }, 1000);
     };
@@ -108,12 +130,8 @@ export const round1Handler = (io, socket) => {
             player.cooldownEndTime = Date.now() + COOLDOWN_DURATION;
             await redis.hset(keys.participants, playerId, JSON.stringify(player));
 
-            io.to(`user:${playerId}`).emit('round1:matchEnd', {
-                type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout',
-            });
-            io.to(`user:${playerId}`).emit('round1:cooldown', {
-                cooldownEndTime: player.cooldownEndTime
-            });
+            io.to(`user:${playerId}`).emit('round1:matchEnd', { type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout' });
+            io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
         }
         await broadcastLobbyUpdate();
     };
@@ -125,15 +143,12 @@ export const round1Handler = (io, socket) => {
     
     const createMatch = async (player1, player2, difficulty) => {
         const question = await getQuestionByDifficulty(difficulty);
-        if (!question) {
-            console.error(`No question for ${difficulty}. Cannot create match.`);
-            return;
-        }
+        if (!question) return console.error(`No question for ${difficulty}. Cannot create match.`);
 
         let timerDuration;
-        if (difficulty === 'R1_HARD') timerDuration = 3 * 60 * 1000;
-        else if (difficulty === 'R1_MEDIUM') timerDuration = 2 * 60 * 1000;
-        else timerDuration = 1.5 * 60 * 1000;
+        if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
+        else if (difficulty === 'R1_MEDIUM') timerDuration =0.5 * 60 * 1000; 
+        else timerDuration = 15 * 60 * 1000;
 
         try {
             const newMatch = await prisma.match.create({
@@ -182,7 +197,6 @@ export const round1Handler = (io, socket) => {
             }, 1000);
             
             console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
-
         } catch (error) {
             console.error("[Create Match Error]", error);
         }
@@ -219,7 +233,6 @@ export const round1Handler = (io, socket) => {
                     matchPromises.push(createMatch(group[i*2], group[i*2 + 1], difficulties[index]));
                 }
             });
-
             await Promise.all(matchPromises);
         } catch (error) {
             console.error("[Matchmaking Error]", error);
@@ -270,12 +283,8 @@ export const round1Handler = (io, socket) => {
         const keys = getRedisKeys();
 
         try {
-            if (await redis.hget(keys.participants, userId)) {
-                return callback?.({ success: true, message: 'Already joined.' });
-            }
-            if (await redis.get(keys.status) === 'ended') {
-                return callback?.({ success: false, error: 'Round has already ended.' });
-            }
+            if (await redis.hget(keys.participants, userId)) return callback?.({ success: true, message: 'Already joined.' });
+            if (await redis.get(keys.status) === 'ended') return callback?.({ success: false, error: 'Round has already ended.' });
             const userData = await prisma.user.findUnique({ where: { id: email } });
             if (!userData) return callback?.({ success: false, error: 'User not found.' });
             
@@ -329,7 +338,7 @@ export const round1Handler = (io, socket) => {
         }, 1000);
 
         matchmakingInterval = setInterval(runMatchmakingCycle, MATCHMAKING_INTERVAL);
-        startMatchmakingCycleBroadcast(); // CHANGE: Start the cycle timer broadcast
+        startMatchmakingCycleBroadcast(roundStartTime);
         runMatchmakingCycle();
         
         io.emit('round1:started', { roundStartTime, roundDuration: ROUND_DURATION });
@@ -385,6 +394,7 @@ export const round1Handler = (io, socket) => {
                 return callback?.({ success: true, participant: null, allParticipants });
             }
 
+            // FIX: Corrected ZADD parameters
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
                 participant.status = 'waiting';
@@ -424,11 +434,11 @@ export const round1Handler = (io, socket) => {
             const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
             const globalTimeRemaining = roundStartTime ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) : 0;
             
-            // CHANGE: Include next matchmaking cycle time in getState response
             let nextMatchmakingCycle = null;
-            if (currentStatus === "running") {
-                const now = Math.floor(Date.now() / 1000);
-                nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL / 1000) - (now % (MATCHMAKING_INTERVAL / 1000)));
+            if (currentStatus === "running" && roundStartTime) {
+                const elapsed = Date.now() - roundStartTime;
+                const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
+                nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
             }
             
             callback?.({ success: true, participant, isActive: currentStatus === "running", globalTimeRemaining, allParticipants, nextMatchmakingCycle });

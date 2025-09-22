@@ -7,6 +7,7 @@ import { round2Handler } from "./round2.handler.js";
 import { round3Handler } from "./round3.handler.js";
 import { adminHandler } from "./admin.handler.js";
 import { globalHandler, broadcastLeaderboard, getLeaderboard } from "./global.handler.js";
+import prisma from "../config/prisma.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -60,6 +61,25 @@ export default function initializeSocket(io) {
         console.error("Authentication error: Invalid token.");
         return next(new Error("Invalid token"));
       }
+
+          // Fetch user from DB to confirm role
+    const dbUser = await prisma.user.findUnique({
+      where: { id: user.email },
+      select: { id: true, role: true },
+    });
+
+    if (!dbUser) {
+      console.error("Authentication error: User not found in DB.");
+      return next(new Error("User not found"));
+    }
+
+    // Extra check: if email == id and role is ADMIN
+    if ( dbUser.role === "ADMIN") {
+      user.role = "ADMIN";
+    } else {
+      user.role = dbUser.role; // fallback to whatever is stored
+    }
+
 
       socket.user = user;
       console.log(`User authenticated: ${user.email}`);

@@ -5,7 +5,6 @@ const verifyAuthToken = async (req, res, next) => {
   const authToken = req.headers.authorization?.split(" ")[1];
 
   if (!authToken) {
-    console.error("❌ No auth token provided");
     return res.status(401).json({ error: "No auth token provided" });
   }
 
@@ -13,19 +12,18 @@ const verifyAuthToken = async (req, res, next) => {
     const { data, error } = await supabase.auth.getUser(authToken);
 
     if (error) {
-      console.error("❌ Supabase auth error:", error);
+      console.error("Auth error:", error);
       return res.status(401).json({ error: "Invalid or expired auth token" });
     }
 
     if (!data?.user) {
-      console.error("❌ No user data returned from Supabase");
       return res.status(401).json({ error: "User not found" });
     }
 
     req.user = data.user;
     next();
   } catch (err) {
-    console.error("❌ Auth middleware error:", err);
+    console.error("Auth middleware error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 };
