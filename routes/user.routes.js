@@ -70,18 +70,19 @@ router.post("/set-username", verifyAuthToken, async (req, res) => {
       where: { username: username.trim() },
     });
 
+
     if (existingUser && existingUser.id !== email) {
       return res.status(409).json({ error: "Username is already taken." });
     }
 
     // Update the user's username
     const updatedUser = await prisma.user.update({
-      where: { id: email },
+      where: { id: email }, 
       data: { username: username.trim() },
     });
 
-    res.status(200).json({ 
-      ok: true, 
+    res.status(200).json({
+      ok: true,
       message: "Username updated successfully.",
       user: { id: updatedUser.id, username: updatedUser.username }
     });
@@ -90,5 +91,6 @@ router.post("/set-username", verifyAuthToken, async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 export default router;
