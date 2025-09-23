@@ -23,8 +23,8 @@ import prisma from "../config/prisma.js";
  * - round3:problems - The array of 6 round questions
  */
 
-const ROUND_DURATION = 90 * 60; // 90 minutes in seconds
-const HACKING_PHASE_START_SECONDS = 30 * 60; // Hacking starts when 30 mins are left
+const ROUND_DURATION = 1 * 60; // 1 minute in seconds
+const HACKING_PHASE_START_SECONDS = 0.5 * 60; // Hacking starts when 30 seconds are left
 const ROUND_NUMBER = 3;
 
 // In-memory state for quick access
@@ -77,7 +77,8 @@ export const round3Handler = (io, socket) => {
   // ## UTILITY FUNCTIONS
 
   const validateUser = () => {
-    const userId = socket.user?.id;
+    const userId = socket.user?.email;
+    console.log('Validating user, email:', userId);
     if (!userId) {
       return { error: 'Unauthorized - No user ID' };
     }
@@ -222,66 +223,82 @@ export const round3Handler = (io, socket) => {
   };
 
   const handleAdminReady = async (payload, callback) => {
-    const { userId, error } = validateUser();
-    if (error) return callback?.({ success: false, error });
+  console.log('[ROUND 3] CHECKPOINT 1: handleAdminReady function started.');
 
-    try {
-      const admin = await prisma.user.findUnique({ where: { id: userId }});
-      if (admin?.role !== 'ADMIN') {
-        return callback?.({ success: false, error: 'Unauthorized: Not an admin.' });
-      }
-      if (globalRoundState.isActive) {
-        return callback?.({ success: false, error: 'Round is already active.' });
-      }
-      
-      // Fetch 6 problems for Round 3
-      const problems = await prisma.problem.findMany({
-        where: { difficulty: 'R3' },
-        take: 6,
-      });
+  const { userId, error } = validateUser();
+  if (error) {
+    console.log('[ROUND 3] EXIT POINT: User validation failed.');
+    return callback?.({ success: false, error });
+  }
 
-      if (problems.length < 6) {
-        return callback?.({ success: false, error: `Insufficient problems found for Round 3. Found only ${problems.length}.`});
-      }
+  try {
+    console.log('[ROUND 3] CHECKPOINT 2: Checking admin role...');
+    const admin = await prisma.user.findUnique({ where: { id: userId } });
 
-      const startTime = Date.now();
-      
-      // Use a pipeline for atomic Redis operations
-      const redisPipeline = redis.pipeline();
-      const keys = getRedisKeys();
-      redisPipeline.set(keys.state, 'IN_PROGRESS');
-      redisPipeline.set(keys.timer, startTime);
-      redisPipeline.set(keys.problems, JSON.stringify(problems));
-      await redisPipeline.exec();
-      
-      // Update DB
-      await prisma.round.update({
-        where: { roundNumber: ROUND_NUMBER },
-        data: { status: 'IN_PROGRESS' },
-      });
-
-      // Update in-memory state
-      globalRoundState.isActive = true;
-      globalRoundState.startTime = startTime;
-      globalRoundState.problems = problems;
-      
-      startGlobalTimer(io);
-
-      io.to(`round${ROUND_NUMBER}`).emit('round3:start', {
-        questions: problems,
-        startTime,
-        duration: ROUND_DURATION,
-      });
-
-      console.log(`[ROUND 3] Round started by admin ${admin.username}.`);
-      callback?.({ success: true, message: 'Round 3 has started.' });
-
-    } catch (err) {
-      console.error('[ROUND 3] Error starting round:', err);
-      callback?.({ success: false, error: 'Failed to start the round.' });
+    if (admin?.role !== 'ADMIN') {
+      console.log(`[ROUND 3] EXIT POINT: Authorization failed. User role is '${admin?.role}'.`);
+      return callback?.({ success: false, error: 'Unauthorized: Not an admin.' });
     }
-  };
 
+    console.log('[ROUND 3] CHECKPOINT 3: Checking if round is already active...');
+    if (globalRoundState.isActive) {
+      console.log('[ROUND 3] EXIT POINT: Round is already active.');
+      return callback?.({ success: false, error: 'Round is already active.' });
+    }
+
+    console.log('[ROUND 3] CHECKPOINT 4: Fetching problems from database...');
+    const problems = await prisma.problem.findMany({
+      where: { difficulty: 'R3' },
+      take: 6,
+    });
+    console.log(`[ROUND 3] Found ${problems.length} problems.`);
+    console.log(`[ROUND 3] Problems details: ${JSON.stringify(problems)}`);
+
+    if (problems.length < 6) {
+      console.log('[ROUND 3] EXIT POINT: Insufficient problems found.');
+      return callback?.({ success: false, error: `Insufficient problems found for Round 3. Found only ${problems.length}.` });
+    }
+
+    console.log('[ROUND 3] CHECKPOINT 5: All checks passed. Starting round setup...');
+
+    const startTime = Date.now();
+    
+    // ... (Redis and Prisma updates happen here) ...
+    const redisPipeline = redis.pipeline();
+    const keys = getRedisKeys();
+    redisPipeline.set(keys.state, 'IN_PROGRESS');
+    redisPipeline.set(keys.timer, startTime);
+    redisPipeline.set(keys.problems, JSON.stringify(problems));
+    await redisPipeline.exec();
+    
+    await prisma.round.update({
+      where: { roundNumber: ROUND_NUMBER },
+      data: { status: 'IN_PROGRESS' },
+    });
+
+    globalRoundState.isActive = true;
+    globalRoundState.startTime = startTime;
+    globalRoundState.problems = problems;
+    
+    startGlobalTimer(io);
+
+    // This is the log you weren't seeing before
+    console.log(`[ROUND 3] FINAL CHECKPOINT: Setup complete. Emitting 'round3:start'.`);
+
+    io.to(`round${ROUND_NUMBER}`).emit('round3:start', {
+      questions: problems,
+      startTime,
+      duration: ROUND_DURATION,
+    });
+
+    console.log(`[ROUND 3] Round started by admin ${admin.username}.`);
+    callback?.({ success: true, message: 'Round 3 has started.' });
+
+  } catch (err) {
+    console.error('[ROUND 3] CRITICAL ERROR in handleAdminReady:', err);
+    callback?.({ success: false, error: 'Failed to start the round due to a server error.' });
+  }
+};
   const handleLockQuestion = async (payload, callback) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
@@ -356,36 +373,37 @@ export const round3Handler = (io, socket) => {
     }
   };
 
-  const handleGetState = async (callback) => {
-    const { userId, error } = validateUser();
-    if (error) return callback?.({ success: false, error });
+  // ✅ Corrected to accept both payload and callback
+const handleGetState = async (payload, callback) => {
+  const { userId, error } = validateUser();
+  if (error) return callback?.({ success: false, error });
 
-    try {
-        const elapsed = globalRoundState.startTime ? Math.floor((Date.now() - globalRoundState.startTime) / 1000) : 0;
-        const timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
+  try {
+    const elapsed = globalRoundState.startTime ? Math.floor((Date.now() - globalRoundState.startTime) / 1000) : 0;
+    const timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
 
-        // Get user's locked questions
-        const locked = await prisma.lockedSolution.findMany({
-            where: { userId },
-            select: { questionId: true }
-        });
-        const lockedQuestionIds = locked.map(l => l.questionId);
+    // Get user's locked questions
+    const locked = await prisma.lockedSolution.findMany({
+      where: { userId },
+      select: { questionId: true }
+    });
+    const lockedQuestionIds = locked.map(l => l.questionId);
 
-        socket.join(`round${ROUND_NUMBER}`);
-        
-        callback?.({
-            success: true,
-            isActive: globalRoundState.isActive,
-            isHackingPhase: globalRoundState.isHackingPhase,
-            timeRemaining,
-            questions: globalRoundState.problems,
-            lockedQuestionIds
-        });
-    } catch (err) {
-        console.error('[ROUND 3] Error getting state:', err);
-        callback?.({ success: false, error: 'Failed to retrieve state.' });
-    }
-  };
+    socket.join(`round${ROUND_NUMBER}`);
+    
+    callback?.({
+      success: true,
+      isActive: globalRoundState.isActive,
+      isHackingPhase: globalRoundState.isHackingPhase,
+      timeRemaining,
+      questions: globalRoundState.problems,
+      lockedQuestionIds
+    });
+  } catch (err) {
+    console.error('[ROUND 3] Error getting state:', err);
+    callback?.({ success: false, error: 'Failed to retrieve state.' });
+  }
+};
   
   const handleReset = async (callback) => {
     const { userId, error } = validateUser();
