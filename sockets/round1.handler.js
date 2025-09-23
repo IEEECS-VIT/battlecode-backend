@@ -8,6 +8,7 @@ const MATCHMAKING_INTERVAL = 0.5 * 60 * 1000;
 const COOLDOWN_DURATION = 0.4 * 60 * 1000;
 const DISCONNECT_TIMEOUT = 1 * 60 * 1000;
 const JANITOR_INTERVAL = 5000;
+const LOBBY_UPDATE_INTERVAL = 5000; // NEW: Interval to refresh and broadcast scores
 
 // Global round management variables
 let globalTimer = null;
@@ -24,15 +25,44 @@ const getRedisKeys = () => ({
     startTime: `round${ROUND_NUMBER}:status:startTime`,
 });
 
+// MODIFIED: This function now fetches live scores from the database
 const broadcastLobbyUpdate = async (io) => {
     try {
         const keys = getRedisKeys();
         const allParticipantsData = await redis.hgetall(keys.participants);
-        const participantsList = Object.values(allParticipantsData).map(p => JSON.parse(p));
-        const lobbyParticipants = participantsList.filter(p => p.status === 'lobby');
+        if (Object.keys(allParticipantsData).length === 0) {
+            io.emit('round1:participantsUpdate', { participants: [] });
+            return;
+        }
+
+        // 1. Fetch live scores and ranks for all participants from the database
+        const participantIds = Object.keys(allParticipantsData);
+        const usersFromDb = await prisma.user.findMany({
+            where: { id: { in: participantIds } },
+            select: { id: true, eventScore: true },
+            orderBy: [{ eventScore: 'desc' }, { username: 'asc' }]
+        });
+        
+        // 2. Create maps for quick lookup of score and new rank
+        const scoreMap = new Map(usersFromDb.map(u => [u.id, u.eventScore]));
+        const rankMap = new Map(usersFromDb.map((u, i) => [u.id, i + 1]));
+
+        // 3. Augment Redis data with live DB data
+        const participantsList = Object.values(allParticipantsData).map(pStr => {
+            const p = JSON.parse(pStr);
+            p.eventScore = scoreMap.get(p.id) ?? p.eventScore ?? 0; // Update with live score
+            p.rank = rankMap.get(p.id) ?? p.rank; // Update with live rank
+            return p;
+        }).sort((a, b) => a.rank - b.rank); // Sort by the new rank for display
+
         const currentStatus = await redis.get(keys.status);
 
-        io.emit('lobby:round1', { participants: lobbyParticipants, totalParticipants: lobbyParticipants.length, isActive: currentStatus === "running" });
+        // 4. Broadcast the updated and enriched list
+        io.emit('lobby:round1', { 
+            participants: participantsList.filter(p => p.status === 'lobby'), 
+            totalParticipants: participantsList.filter(p => p.status === 'lobby').length,
+            isActive: currentStatus === "running" 
+        });
         io.emit('round1:participantsUpdate', { participants: participantsList });
     } catch (error) {
         console.error('[Broadcast Error]', error);
@@ -68,7 +98,6 @@ const startJanitor = (io) => {
                     participant.status = 'waiting';
                     delete participant.cooldownEndTime;
                     await redis.hset(keys.participants, userId, JSON.stringify(participant));
-                    await redis.zadd(keys.readyQueue, participant.rank, userId);
                     io.to(`user:${userId}`).emit('round1:cooldownEnd');
                     hasCooldownUpdates = true;
                 }
@@ -84,6 +113,9 @@ const startJanitor = (io) => {
 
 export const round1Handler = (io, socket) => {
     startJanitor(io);
+
+    // NEW: Start a periodic broadcast to keep leaderboard scores live
+    const lobbyUpdateInterval = setInterval(() => broadcastLobbyUpdate(io), LOBBY_UPDATE_INTERVAL);
 
     const validateUser = () => {
         const userId = socket.user?.email;
@@ -112,23 +144,26 @@ export const round1Handler = (io, socket) => {
         await redis.hdel(keys.matches, matchId);
         await prisma.match.update({ where: { id: matchId }, data: { status: 'COMPLETED', winnerId } }).catch(err => console.log(`Prisma update failed for match ${matchId}, might be a bot match.`));
 
-        const playerRanks = await prisma.user.findMany({ select: { id: true }, orderBy: [{ eventScore: 'desc' }, { username: 'asc' }] });
-        const rankMap = new Map(playerRanks.map((u, i) => [u.id, i + 1]));
+        const playersFromDb = await prisma.user.findMany({
+            where: { id: { in: match.players } },
+            select: { id: true, eventScore: true }
+        });
+        const scoreMap = new Map(playersFromDb.map(p => [p.id, p.eventScore]));
 
         for (const playerId of match.players) {
             const playerStr = await redis.hget(keys.participants, playerId);
             if (!playerStr) continue;
 
             const player = JSON.parse(playerStr);
-            player.rank = rankMap.get(playerId) || player.rank;
             player.status = 'cooldown';
             player.cooldownEndTime = Date.now() + COOLDOWN_DURATION;
+            player.eventScore = scoreMap.get(playerId) ?? player.eventScore;
+
             await redis.hset(keys.participants, playerId, JSON.stringify(player));
 
             io.to(`user:${playerId}`).emit('round1:matchEnd', { type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout' });
             io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
         }
-        await broadcastLobbyUpdate(io);
     };
 
     const getQuestionByDifficulty = async (difficulty) => {
@@ -153,7 +188,6 @@ export const round1Handler = (io, socket) => {
             const matchDetails = { id: matchId, players: [player1.id, player2.id], problemId: question.id, startTime, duration: timerDuration, difficulty, isPaused: false, timePaused: 0 };
 
             await redis.multi()
-                .zrem(keys.readyQueue, player1.id, player2.id)
                 .hset(keys.matches, matchId, JSON.stringify(matchDetails))
                 .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
                 .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
@@ -190,17 +224,27 @@ export const round1Handler = (io, socket) => {
         }
     };
 
+    // MODIFIED: This function now uses live eventScore for matchmaking
     const runMatchmakingCycle = async () => {
         const keys = getRedisKeys();
-        const queueSize = await redis.zcard(keys.readyQueue);
-        if (queueSize < 2) return;
+        const allParticipantsData = await redis.hgetall(keys.participants);
+        const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
 
-        console.log(`[Matchmaking] Running cycle with ${queueSize} players.`);
-        
+        const waitingPlayerIds = allParticipants
+            .filter(p => p.status === 'waiting')
+            .map(p => p.id);
+
+        if (waitingPlayerIds.length < 2) return;
+        console.log(`[Matchmaking] Running cycle with ${waitingPlayerIds.length} players waiting.`);
+
         try {
-            const playerIds = await redis.zrange(keys.readyQueue, 0, -1);
-            const playersRaw = await redis.hmget(keys.participants, ...playerIds);
-            let waitingPlayers = playersRaw.map(p => JSON.parse(p)).filter(p => p && p.status === 'waiting');
+            const playersWithLiveScores = await prisma.user.findMany({
+                where: { id: { in: waitingPlayerIds } },
+                select: { id: true, username: true, eventScore: true },
+                orderBy: { eventScore: 'desc' }
+            });
+
+            let waitingPlayers = playersWithLiveScores;
 
             if (waitingPlayers.length < 2) return;
 
@@ -216,12 +260,32 @@ export const round1Handler = (io, socket) => {
             const difficulties = ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'];
             const matchPromises = [];
 
+            const matchedPlayerIds = new Set();
             groups.forEach((group, index) => {
                 for (let i = 0; i < Math.floor(group.length / 2); i++) {
-                    matchPromises.push(createMatch(group[i*2], group[i*2 + 1], difficulties[index]));
+                    const player1 = group[i * 2];
+                    const player2 = group[i * 2 + 1];
+                    matchPromises.push(createMatch(player1, player2, difficulties[index]));
+                    matchedPlayerIds.add(player1.id);
+                    matchedPlayerIds.add(player2.id);
                 }
             });
+
+            // Update status for players who are now in a match
+            const multi = redis.multi();
+            const allRedisParticipants = await redis.hgetall(keys.participants);
+            for (const playerId of matchedPlayerIds) {
+                if (allRedisParticipants[playerId]) {
+                    const participant = JSON.parse(allRedisParticipants[playerId]);
+                    participant.status = 'in-match';
+                    multi.hset(keys.participants, playerId, JSON.stringify(participant));
+                }
+            }
+            await multi.exec();
+
             await Promise.all(matchPromises);
+            await broadcastLobbyUpdate(io);
+
         } catch (error) {
             console.error("[Matchmaking Error]", error);
         }
@@ -273,11 +337,20 @@ export const round1Handler = (io, socket) => {
         try {
             if (await redis.hget(keys.participants, userId)) return callback?.({ success: true, message: 'Already joined.' });
             if (await redis.get(keys.status) === 'ended') return callback?.({ success: false, error: 'Round has already ended.' });
+            
             const userData = await prisma.user.findUnique({ where: { id: email } });
             if (!userData) return callback?.({ success: false, error: 'User not found.' });
             
             const userRank = (await prisma.user.count({ where: { eventScore: { gt: userData.eventScore || 0 } }})) + 1;
-            const newParticipant = { id: userId, socketId: socket.id, username: userData.username, rank: userRank, status: 'lobby' };
+            
+            const newParticipant = { 
+                id: userId, 
+                socketId: socket.id, 
+                username: userData.username, 
+                rank: userRank,
+                eventScore: userData.eventScore,
+                status: 'lobby' 
+            };
             await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
 
             await broadcastLobbyUpdate(io);
@@ -311,7 +384,6 @@ export const round1Handler = (io, socket) => {
             if (p.status === 'lobby') {
                 p.status = 'waiting';
                 multi.hset(keys.participants, p.id, JSON.stringify(p));
-                multi.zadd(keys.readyQueue, p.rank, p.id);
             }
         });
         await multi.exec();
@@ -335,6 +407,7 @@ export const round1Handler = (io, socket) => {
     });
 
     socket.on('disconnect', async () => {
+        clearInterval(lobbyUpdateInterval);
         const { userId, error } = validateUser();
         if (error) return;
 
@@ -388,7 +461,6 @@ export const round1Handler = (io, socket) => {
                 participant.status = 'waiting';
                 delete participant.cooldownEndTime;
                 await redis.hset(keys.participants, userId, JSON.stringify(participant));
-                await redis.zadd(keys.readyQueue, participant.rank, userId);
                 await broadcastLobbyUpdate(io);
             }
             
