@@ -62,6 +62,8 @@ export default function initializeSocket(io) {
         return next(new Error("Invalid token"));
       }
 
+      // console.log("Authenticated user:", user);
+
           // Fetch user from DB to confirm role
     const dbUser = await prisma.user.findUnique({
       where: { id: user.email },

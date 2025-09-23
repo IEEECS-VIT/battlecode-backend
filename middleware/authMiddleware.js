@@ -46,6 +46,7 @@ const verifySocketToken = async (token) => {
       throw new Error("User not found");
     }
 
+    // console.log(data.user); 
     return data.user;
   } catch (err) {
     console.error("Socket auth verification error:", err);

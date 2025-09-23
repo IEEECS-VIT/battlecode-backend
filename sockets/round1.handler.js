@@ -4,7 +4,7 @@ import prisma from "../config/prisma.js";
 // Constants
 const ROUND_DURATION = 90 * 60 * 1000;
 const ROUND_NUMBER = 1;
-const MATCHMAKING_INTERVAL = 0.5 * 60 * 1000; // Corrected back to 3 minutes
+const MATCHMAKING_INTERVAL = 0.5 * 60 * 1000;
 const COOLDOWN_DURATION = 0.4 * 60 * 1000;
 const DISCONNECT_TIMEOUT = 1 * 60 * 1000;
 const JANITOR_INTERVAL = 5000;
@@ -24,10 +24,30 @@ const getRedisKeys = () => ({
     startTime: `round${ROUND_NUMBER}:status:startTime`,
 });
 
+const broadcastLobbyUpdate = async (io) => {
+    try {
+        const keys = getRedisKeys();
+        const allParticipantsData = await redis.hgetall(keys.participants);
+        const participantsList = Object.values(allParticipantsData).map(p => JSON.parse(p));
+        const lobbyParticipants = participantsList.filter(p => p.status === 'lobby');
+        const currentStatus = await redis.get(keys.status);
+
+        io.emit('lobby:round1', { participants: lobbyParticipants, totalParticipants: lobbyParticipants.length, isActive: currentStatus === "running" });
+        io.emit('round1:participantsUpdate', { participants: participantsList });
+    } catch (error) {
+        console.error('[Broadcast Error]', error);
+    }
+};
+
+let isJanitorStarted = false;
 const startJanitor = (io) => {
+    if (isJanitorStarted) return;
+    isJanitorStarted = true;
+
     setInterval(async () => {
         try {
             const keys = getRedisKeys();
+            // Janitor for disconnected matches
             const allMatchesStr = await redis.hgetall(keys.matches);
             for (const matchId in allMatchesStr) {
                 const match = JSON.parse(allMatchesStr[matchId]);
@@ -38,7 +58,7 @@ const startJanitor = (io) => {
                 }
             }
 
-            // FIX: Janitor now handles expired cooldowns
+            // Janitor for expired cooldowns
             const allParticipantsData = await redis.hgetall(keys.participants);
             let hasCooldownUpdates = false;
             for (const userId in allParticipantsData) {
@@ -62,38 +82,13 @@ const startJanitor = (io) => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-// Pass `io` to janitor on initialization
-let isJanitorStarted = false;
-
 export const round1Handler = (io, socket) => {
-    if (!isJanitorStarted) {
-        startJanitor(io);
-        isJanitorStarted = true;
-    }
+    startJanitor(io);
 
     const validateUser = () => {
         const userId = socket.user?.email;
         if (!userId) return { error: 'Unauthorized' };
         return { userId, email: userId };
-    };
-
-    const broadcastLobbyUpdate = async () => {
-        try {
-            const keys = getRedisKeys();
-            const allParticipantsData = await redis.hgetall(keys.participants);
-            const participantsList = Object.values(allParticipantsData).map(p => JSON.parse(p));
-            const lobbyParticipants = participantsList.filter(p => p.status === 'lobby');
-            const currentStatus = await redis.get(keys.status);
-
-            io.emit('lobby:round1', {
-                participants: lobbyParticipants,
-                totalParticipants: lobbyParticipants.length,
-                isActive: currentStatus === "running"
-            });
-            io.emit('round1:participantsUpdate', { participants: participantsList });
-        } catch (error) {
-            console.error('[Broadcast Error]', error);
-        }
     };
 
     const startMatchmakingCycleBroadcast = (roundStartTime) => {
@@ -133,7 +128,7 @@ export const round1Handler = (io, socket) => {
             io.to(`user:${playerId}`).emit('round1:matchEnd', { type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout' });
             io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
         }
-        await broadcastLobbyUpdate();
+        await broadcastLobbyUpdate(io);
     };
 
     const getQuestionByDifficulty = async (difficulty) => {
@@ -147,14 +142,11 @@ export const round1Handler = (io, socket) => {
 
         let timerDuration;
         if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
-        else if (difficulty === 'R1_MEDIUM') timerDuration =0.5 * 60 * 1000; 
+        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
         else timerDuration = 15 * 60 * 1000;
 
         try {
-            const newMatch = await prisma.match.create({
-                data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' },
-            });
-
+            const newMatch = await prisma.match.create({ data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' } });
             const matchId = newMatch.id;
             const startTime = Date.now();
             const keys = getRedisKeys();
@@ -181,15 +173,11 @@ export const round1Handler = (io, socket) => {
             const timerInterval = setInterval(async () => {
                 const currentMatchStr = await redis.hget(getRedisKeys().matches, matchId);
                 if (!currentMatchStr) return clearInterval(timerInterval);
-                
                 const currentMatch = JSON.parse(currentMatchStr);
                 if (currentMatch.isPaused) return;
-
                 const elapsed = (Date.now() - currentMatch.startTime) - currentMatch.timePaused;
                 const timeRemaining = Math.max(0, Math.floor((currentMatch.duration - elapsed) / 1000));
-                
                 io.to(matchRoom).emit('round1:timerUpdate', { timeRemaining });
-
                 if (timeRemaining <= 0) {
                     clearInterval(timerInterval);
                     handleMatchEnd(matchId, null);
@@ -292,7 +280,7 @@ export const round1Handler = (io, socket) => {
             const newParticipant = { id: userId, socketId: socket.id, username: userData.username, rank: userRank, status: 'lobby' };
             await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
 
-            await broadcastLobbyUpdate();
+            await broadcastLobbyUpdate(io);
             callback?.({ success: true, message: 'Successfully joined lobby.' });
         } catch (err) {
             console.error('[Join Error]', err);
@@ -342,7 +330,7 @@ export const round1Handler = (io, socket) => {
         runMatchmakingCycle();
         
         io.emit('round1:started', { roundStartTime, roundDuration: ROUND_DURATION });
-        await broadcastLobbyUpdate();
+        await broadcastLobbyUpdate(io);
         callback?.({ success: true, message: 'Round 1 started.' });
     });
 
@@ -385,23 +373,23 @@ export const round1Handler = (io, socket) => {
 
         try {
             const keys = getRedisKeys();
-            const currentStatus = await redis.get(keys.status);
-            const allParticipantsData = await redis.hgetall(keys.participants);
-            const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
-            let participant = allParticipants.find(p => p.id === userId);
+            const participantStr = await redis.hget(keys.participants, userId);
             
-            if (!participant) {
+            if (!participantStr) {
+                const allParticipantsData = await redis.hgetall(keys.participants);
+                const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
                 return callback?.({ success: true, participant: null, allParticipants });
             }
+            
+            let participant = JSON.parse(participantStr);
 
-            // FIX: Corrected ZADD parameters
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
                 participant.status = 'waiting';
                 delete participant.cooldownEndTime;
                 await redis.hset(keys.participants, userId, JSON.stringify(participant));
                 await redis.zadd(keys.readyQueue, participant.rank, userId);
-                await broadcastLobbyUpdate();
+                await broadcastLobbyUpdate(io);
             }
             
             if (participant.socketId !== socket.id) {
@@ -409,12 +397,14 @@ export const round1Handler = (io, socket) => {
                 await redis.hset(keys.participants, userId, JSON.stringify(participant));
             }
             
+            let matchDataForClient = null;
             if (participant.status === 'in-match') {
                 const matches = await redis.hgetall(keys.matches);
                 for (const matchId in matches) {
                     let match = JSON.parse(matches[matchId]);
                     if (match.players.includes(userId)) {
                         socket.join(`match:${matchId}`);
+                        
                         if (match.isPaused && match.disconnectedPlayerId === userId) {
                             console.log(`[Reconnect] User ${userId} reconnected, resuming match ${matchId}.`);
                             match.isPaused = false;
@@ -425,11 +415,26 @@ export const round1Handler = (io, socket) => {
                             await redis.hset(keys.matches, matchId, JSON.stringify(match));
                             io.to(`match:${matchId}`).emit('round1:matchResumed');
                         }
+
+                        const question = await prisma.problem.findUnique({ where: { id: match.problemId }});
+                        const opponentId = match.players.find(pId => pId !== userId);
+                        const opponentStr = opponentId ? await redis.hget(keys.participants, opponentId) : null;
+                        const opponent = opponentStr ? JSON.parse(opponentStr) : { id: opponentId, rank: 'N/A' };
+
+                        matchDataForClient = {
+                            question: question,
+                            opponent: { id: opponent.id, rank: opponent.rank },
+                            startTime: match.startTime,
+                            duration: match.duration,
+                        };
                         break;
                     }
                 }
             }
 
+            const allParticipantsData = await redis.hgetall(keys.participants);
+            const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            const currentStatus = await redis.get(keys.status);
             const startTimeStr = await redis.get(keys.startTime);
             const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
             const globalTimeRemaining = roundStartTime ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) : 0;
@@ -441,7 +446,15 @@ export const round1Handler = (io, socket) => {
                 nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
             }
             
-            callback?.({ success: true, participant, isActive: currentStatus === "running", globalTimeRemaining, allParticipants, nextMatchmakingCycle });
+            callback?.({ 
+                success: true, 
+                participant,
+                isActive: currentStatus === "running",
+                globalTimeRemaining, 
+                allParticipants, 
+                nextMatchmakingCycle,
+                matchData: matchDataForClient,
+            });
         } catch (err) {
             console.error('[GetState Error]', err);
             callback?.({ success: false, error: 'Server error fetching state.' });
@@ -465,4 +478,3 @@ export const round1Handler = (io, socket) => {
 };
 
 export const getRound1MatchEndHandler = () => round1MatchEndHandler;
-
