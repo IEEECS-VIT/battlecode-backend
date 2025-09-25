@@ -67,6 +67,7 @@ model Submission {
   roundId         Int
   code            String
   language        String
+  score           Float?
   status          SubmissionStatus
   runtime         Int?
   memory          Int?

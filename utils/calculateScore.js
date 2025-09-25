@@ -26,15 +26,15 @@ export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win)
     var current_score = 0;
     
     switch (difficulty){
-        case "EASY":
+        case "R1_EASY":
             total_time = 15*60; //15 mins
             max_score = 20;
             break;
-        case "MEDIUM":
+        case "R1_MEDIUM":
             total_time = 20*60; //20 mins
             max_score = 30;
             break;
-        case "HARD":
+        case "R1_HARD":
             total_time = 25*60; //25 mins
             max_score = 40;
             break;

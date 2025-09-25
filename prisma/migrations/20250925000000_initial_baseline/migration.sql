@@ -2,7 +2,7 @@
 CREATE TYPE "Role" AS ENUM ('ADMIN', 'PLAYER');
 
 -- CreateEnum
-CREATE TYPE "Difficulty" AS ENUM ('EASY', 'MEDIUM', 'HARD');
+CREATE TYPE "Difficulty" AS ENUM ('R0', 'R1_EASY', 'R1_MEDIUM', 'R1_HARD', 'R2_BOUNTY', 'R2_CHALLENGE', 'R3');
 
 -- CreateEnum
 CREATE TYPE "RoundStatus" AS ENUM ('LOCKED', 'LOBBY', 'IN_PROGRESS', 'COMPLETED');
@@ -21,8 +21,7 @@ CREATE TABLE "User" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "regNo" TEXT NOT NULL,
-    "username" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
+    "username" TEXT,
     "role" "Role" NOT NULL DEFAULT 'PLAYER',
     "eventScore" INTEGER NOT NULL DEFAULT 0,
     "currentRound" INTEGER NOT NULL DEFAULT 0,
@@ -137,9 +136,6 @@ CREATE UNIQUE INDEX "User_regNo_key" ON "User"("regNo");
 CREATE UNIQUE INDEX "User_username_key" ON "User"("username");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
-
--- CreateIndex
 CREATE UNIQUE INDEX "Problem_title_key" ON "Problem"("title");
 
 -- CreateIndex
@@ -192,3 +188,4 @@ ALTER TABLE "_ProblemCategories" ADD CONSTRAINT "_ProblemCategories_A_fkey" FORE
 
 -- AddForeignKey
 ALTER TABLE "_ProblemCategories" ADD CONSTRAINT "_ProblemCategories_B_fkey" FOREIGN KEY ("B") REFERENCES "Problem"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
