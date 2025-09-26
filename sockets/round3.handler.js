@@ -139,6 +139,7 @@ export const round3Handler = (io, socket) => {
           } else {
             await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' }});
             await redis.set(keys.state, 'COMPLETED');
+            
             initializeGlobalState();
           }
         }
