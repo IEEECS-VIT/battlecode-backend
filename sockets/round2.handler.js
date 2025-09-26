@@ -1,540 +1,548 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
 
-const LEVEL_TIME_LIMIT_MS = {
-  easy: 10 * 60 * 1000,
-  medium: 20 * 60 * 1000,
-  hard: 30 * 60 * 1000,
+// --- Constants ---
+const ROUND_DURATION_MS = 90 * 60 * 1000;
+const MATCH_DURATION_MS = 20 * 60 * 1000;
+const COOLDOWN_DURATION_S = 2 * 60;
+const LOBBY_UPDATE_INTERVAL_MS = 3000;
+const ACTION_LOCK_MS = 5 * 60 * 1000; // 5 minutes
+
+// --- Module-Scoped Variables ---
+let round2IO = null;
+let matchEndHandler = null;
+let bountyEndHandler = null;
+let lobbyUpdateInterval = null;
+
+// --- Helper Functions ---
+const getRedisKeys = (userId = '', questionId = '', matchId = '') => ({
+    participants: "round2:participants",
+    roundStarted: "round2:started",
+    roundEndTime: "round2:endTime",
+    elites: "round2:elites",
+    challengers: "round2:challengers",
+    role: (id = userId) => `round2:role:${id}`,
+    cooldown: (id = userId) => `round2:cooldown:${id}`,
+    bountySession: (uid = userId, qid = questionId) => `round2:bounty:${uid}:${qid}`,
+    activeBounty: (id = userId) => `round2:activeBounty:${id}`,
+    challengeRequest: (challengerId, eliteId) => `round2:request:${challengerId}:${eliteId}`,
+    pendingRequests: (id = eliteId) => `round2:pending:${id}`,
+    outgoingRequests: (id = challengerId) => `round2:outgoing:${id}`,
+    matchInfo: (id = matchId) => `round2:match:${id}`,
+    userMatch: (id = userId) => `round2:userMatch:${id}`,
+    rejectCount: (id = userId) => `round2:rejects:${id}`,
+    solvedBounties: () => "round2:solvedBounties"
+});
+
+// --- Broadcasters ---
+const broadcastRoundState = async () => {
+  if (!round2IO) return;
+  try {
+    const keys = getRedisKeys();
+    const [participantsData, isRoundActive, endTimeStr] = await Promise.all([
+      redis.hgetall(keys.participants),
+      redis.get(keys.roundStarted),
+      redis.get(keys.roundEndTime)
+    ]);
+    
+    const participantsList = Object.values(participantsData).map(p => JSON.parse(p));
+    const timeRemaining = endTimeStr ? Math.max(0, parseInt(endTimeStr) - Date.now()) : 0;
+
+    round2IO.to('round2_lobby').emit("round2:lobbyUpdate", {
+      participants: participantsList,
+      isRoundActive: !!isRoundActive,
+    });
+    
+    if(isRoundActive){
+        round2IO.to('round2_lobby').emit('round2:timerUpdate', { timeRemaining });
+    }
+
+  } catch (err) {
+    console.error("Error broadcasting R2 round state:", err);
+  }
 };
 
 export const round2Handler = (io, socket) => {
-    const handleClientMessage = (payload, callback) => {
-      console.log(
-        `Message from client ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
-      );
+  if (!round2IO) round2IO = io;
+  const keys = getRedisKeys();
   
-      socket.emit("server:messageReceived", {
-        confirmation: `We received your message: "${payload.message}"`,
-      });
-  
-      if (callback) {
-        callback({ success: true, status: "Message handled by server." });
-      }
-    };
+  if (!lobbyUpdateInterval) {
+    lobbyUpdateInterval = setInterval(broadcastRoundState, 1000);
+    console.log("✅ Round 2 Global State Updater Started.");
+  }
 
-    //1.round2:join(Client -> Server)
+  console.log('New socket connection for Round 2:', socket.user?.email);
 
-    const handleLobbyJoin=async (callback)=>{
-      try{
-        const userId=socket.user.id;
-        const username = socket.user.user_metadata?.full_name || socket.user.email;
-        const lobbyId="round2:lobby"; //defining sorted redis set for the lobby
+  // --- Core Logic Handlers ---
+  const handleMatchEnd = async (matchId, winnerId, reason) => {
+    try {
+      const matchKey = keys.matchInfo(matchId);
+      const matchDataStr = await redis.get(matchKey);
+      if (!matchDataStr) return;
+      const matchData = JSON.parse(matchDataStr);
+      const { challengerId, eliteId } = matchData;
+      const loserId = winnerId === challengerId ? eliteId : challengerId;
 
-        //fetching round 1 scores from redis
-        const round1Score=await redis.hget("round1:scores",userId);
-        if(!round1Score){
-          return callback({success:false,error:"Round 1 score of player not found."});
-        }
+      io.to(matchId).emit("round2:matchResult", { matchId, winnerId, loserId, reason });
 
-        await redis.zadd(lobbyId, { score: round1Score, value: userId }); //store users on the basis of round1 score in the ss
-        socket.join(lobbyId); 
-        socket.join(userId); //join personal room for targeted emits
-        io.to(lobbyId).emit("Player joined",{userId,username});
-        await redis.set(`round2:lastActive:${userId}`, Date.now()); 
+      const winnerData = await prisma.user.findUnique({ where: { id: winnerId }, select: { eventScore: true }});
+      const winnerParticipantStr = await redis.hget(keys.participants, winnerId);
 
-        callback({success:true});
-      }catch(err){
-        console.error("Error in handleLobbyJoin handler",err);
-        callback({success:false,error:"Server error"});
-
-      }
-    }
-
-    //2.round2:Start (Client -> Server) - starts round, timer and assigns roles
-
-    const handleStart = async (callback)=>{
-      try{
-        const lobbyId="round2:lobby";
-
-        if(!socket.user.isAdmin){
-          return callback({success:false,message:"User not authorized"});
-        }
-
-        const endTime = Date.now() + 90*60*1000;
-        await redis.multi()
-        .set("round2:started","true")
-        .set("round2:endTime",endTime)
-        .exec();
-
-        const players = await redis.zrevrange(lobbyId,0,-1,"WITHSCORES"); //returns with scores in desc order
-        const totalPlayers = players.length/2; //an array [user,score,user,score] type was returned
-        const eliteCount=Math.ceil(totalPlayers*0.3); //rounds up
-
-        let elites =[];
-        let challengers=[];
-
-        for(let i=0;i<totalPlayers;i++)
-        {
-          const playerId=players[i*2];
-          const role = i<eliteCount ? "elite":"challenger";
-
-          await redis.set(`round2:role:${playerId}`, role);
-          await redis.set(`round2:lastActive:${playerId}`, Date.now());
-
-          io.to(playerId).emit("round2:rolesAssigned", { role });
-
-          if (i < eliteCount) elites.push(playerId);
-          else challengers.push(playerId);
-        }
-
-        io.to(lobbyId).emit("round2:started",{
-          message:"Round 2 starts now. All the best players.",
-          endTime,
-          elites,
-          challengers,
-        });
-
-        callback({success:true});
-
-        //persistant timer
-        const interval=setInterval(async() => {
-          const storeEndTime=parseInt(await redis.get("round2:endTime"),10);
-          if(!storeEndTime) return clearInterval(interval);
-
-          if(Date.now()>=storeEndTime){
-            io.to(lobbyId).emit("round2:ended",{message:"Round 2 has officially ended."});
-            await redis.del("round2:started");
-            await redis.del("round2:endTime");
-            clearInterval(interval);
+      if (winnerParticipantStr) {
+          const winnerParticipant = JSON.parse(winnerParticipantStr);
+          if (winnerParticipant.role === "challenger" && winnerData.eventScore > 100) {
+              const loserParticipantStr = await redis.hget(keys.participants, loserId);
+              const loserParticipant = JSON.parse(loserParticipantStr);
+              winnerParticipant.role = "elite";
+              loserParticipant.role = "challenger";
+              
+              await redis.multi()
+                  .hset(keys.participants, winnerId, JSON.stringify(winnerParticipant))
+                  .hset(keys.participants, loserId, JSON.stringify(loserParticipant))
+                  .set(keys.role(winnerId), "elite").set(keys.role(loserId), "challenger")
+                  .srem(keys.challengers, winnerId).sadd(keys.elites, winnerId)
+                  .srem(keys.elites, loserId).sadd(keys.challengers, loserId)
+                  .exec();
+              io.emit("round2:roleUpdate", { newElite: winnerId, newChallenger: loserId });
           }
-        }, 5000);
-      }catch(err){
-        console.error("Error in handleStart",err);
-        callback({success:false,message:"Server error"});
       }
+      
+      const loserParticipantStr = await redis.hget(keys.participants, loserId);
+      if (loserParticipantStr) {
+          const loserParticipant = JSON.parse(loserParticipantStr);
+          if (loserParticipant.role === 'elite') {
+              await prisma.user.update({ where: { id: loserId }, data: { eventScore: { decrement: 2 } }});
+          }
+      }
+      
+      for (const userId of [challengerId, eliteId]) {
+          const pStr = await redis.hget(keys.participants, userId);
+          if (pStr) {
+              const p = JSON.parse(pStr);
+              p.status = `${p.role}:idle`;
+              await redis.hset(keys.participants, userId, JSON.stringify(p));
+          }
+          await redis.set(keys.cooldown(userId), "true", "EX", COOLDOWN_DURATION_S);
+          io.to(userId).emit("round2:cooldown", { duration: COOLDOWN_DURATION_S });
+      }
+
+      await redis.del(keys.userMatch(challengerId), keys.userMatch(eliteId), matchKey);
+      await broadcastRoundState();
+    } catch (err) {
+      console.error(`Error in handleMatchEnd for match ${matchId}:`, err);
     }
-
-    //3.round2:handleBountyStart (client -> start) - gets all the questions and emits to all
-    const handleBountyStart = async(callback)=>{
-      try{
-        const userId = socket.user.id;
-        const lobbyId = "round2:lobby";
-        
-        //fetch random questions
-        const questions = await prisma.bountyQuestion.findMany({
-          select:{ id: true, title: true, level: true, description: true },
-          orderBy: { id: "asc" },
-        });
-
-        callback({ success: true, questions });
-        io.to(lobbyId).emit("round2:bountyStart",{questions})
-
-      }catch(err){
-        console.error("Error in bountyStart handler",err);
-        callback({success:false,message:"Could not start bounty."});
-      }
-    }
-
-    //4.handleBountyBeginQuestion - when 1 question selected
-    const handleBountyBeginQuestion = async (payload,callback)=>{
-      try{
-        const userId = socket.user.id;
-        const {questionId}=payload;
-
-        const question=await prisma.bountyQuestion.findUnique({
-          where:{id:questionId},
-          select:{id:true,level:true}
-        })
-
-        if(!question){
-          return callback({success:false,message:"Question not found."});
-        }
-
-        const timeLimit=LEVEL_TIME_LIMIT_MS[question.level];
-        const startTime = Date.now();
-        const endTime = startTime + timeLimit;
-
-        const sessionKey=`round2:bounty:${userId}:${questionId}`;
-        await redis.hset(sessionKey, {
-          status: "active",
-          questionId,
-          startTime,
-          endTime,
-        });
-
-        callback({ success: true, questionId, startTime, endTime });
-        io.to(userId).emit("round2:bountyBeginQuestion", { questionId, endTime });
-      }catch(err){
-        console.error("Error in handleBountyBeginQuestion:", err);
-        callback({ success: false, message: "Could not start question." });
-      }
-    }
-
-    //5.round2:bountyProgress (frontend needs to emit periodically)
-    const bountyProgress = async(payload,callback)=>{
-      try{
-        const userId=socket.user.id;
-        const { questionId, code } = payload;
-        const sessionKey = `round2:bounty:${userId}:${questionId}`;
-        const session = await redis.hgetall(sessionKey);
-
-        if (!session || session.status !== "active") {
-            return callback?.({ success: false, message: "No active bounty session" }); //called only if it exists
-        }
-
-        await redis.hset(sessionKey, { codeSnapshot: code }); //autosave
-        await redis.set(`round2:lastActive:${userId}`, Date.now());
-        callback?.({ success: true });
-
-      }catch(err){
-        console.error("Error in bountyProgress:", err);
-        callback?.({ success: false, message: "Server error" });
-      }
-    }
-
-    //6.bounty suggestion (server -> client ) - when inactive for over 5 mins
-    const suggestBounty = async(userId)=>{
-      try{
-        const lastActive=await redis.get(`round2:lastActive:${userId}`);
-        if(!lastActive) return;
-
-        const idleTime = Date.now()-parseInt(lastActive);
-        if(idleTime>5*60*1000)
-        {
-          io.to(userId).emit("round2:bountySuggestion",{
-            message:"You've been inactive for a while there. Maybe try bounty questions to boost your scores."
-          });
-        }
-
-      }catch(err){
-        console.error("Error in suggestBounty handler: ",err);
-      }
-    }
-
-    setInterval(async () => {
-    const lobbyId = "round2:lobby";
-    const players = await redis.zrange(lobbyId, 0, -1);
-    for (const userId of players) suggestBounty(userId);
-    }, 60 * 1000);
-
-    //7.challenge request (client -> server)
-    const handleChallengeRequest=async(payload,callback)=>{
-      try{
-        const challengerId=socket.user.id;
-        const { eliteId } = payload;
-
-        //verify roles
-        const [challengerRole,eliteRole]=await redis.mget(`round2:role:${challengerId}`,`round2:role:${eliteId}`);
-
-        if(challengerRole!=="challenger")
-        {
-          return callback?.({success:false,message:"Only challengers can send match requests"});
-        }
-
-        if(eliteRole!=="elite")
-        {
-          return callback?.({success:false,message:"Only elites can be challenged for matches"});
-        }
-
-        //check status
-        const [challengerStatus,eliteStatus]=await Promise.all([
-          redis.get(`round2:status:${challengerId}`),
-          redis.get(`round2:status:${eliteId}`),
-        ]);
-
-        if(challengerStatus==="inMatch")
-        {
-          return callback?.({success:false,message:"You are already lined up for a match."});
-        }
-
-        if(eliteStatus==="inMatch")
-        {
-          return callback?.({success:false,message:"Cannot challenge an elite when they are in match."});
-        }
-
-        const challengerCooldownKey = `round2:cooldown:${challengerId}`;
-        const isChallengerCooldown = await redis.exists(challengerCooldownKey);
-
-        if (isChallengerCooldown) {
-          return callback({
-            success: false,
-            message: "You are in cooldown. Try again later."
-          });
-        }
-
-        const eliteCooldownKey = `round2:cooldown:${eliteId}`;
-        const isEliteCooldown = await redis.exists(eliteCooldownKey);
-
-        if (isEliteCooldown) {
-          return callback({
-          success: false,
-          message: "Elite is currently in cooldown. Try again later."
-          });
-        }
-
-        const requestKey = `round2:request:${challengerId}:${eliteId}`;
-        const pendingZ = `round2:pending:${eliteId}`; //elite's sorted set of reqs
-        const outgoingSet= `round2:outgoing:${challengerId}`;
-
-        const requestData = {challengerId,eliteId,createdAt:Date.now()};
-        const setResult = await redis.set(requestKey,JSON.stringify(requestData),{
-          NX:true, //only sets key if it doesn't exist already
-          EX:30,
-        })
-
-        if(!setResult)
-        {
-          return callback?.({success:false,message:"You already have an active request to this elite."});
-        }
-
-        await redis
-        .multi() //creates queue of commands to be run together
-        .zadd(pendingZ,{score:Date.now(),value:challengerId}) //chronoligically arranged reqs
-        .sadd(outgoingSet,eliteId) 
-        .expire(outgoingSet,40) //to ensure autodelete post expiration of req
-        .expire(pendingZ, 300) // auto-clean elite’s pending request queue
-        .exec();
-
-        io.to(eliteId).emit("round2:challengeIncoming",{challengerId,expiresIn:30});
-        return callback?.({success:true,message:"Challenge request sent."});
-
-      }catch(err){
-        console.error("Error in handleChallengeRequest",err);
-        callback({success:false,message:"Server error"});
-      }
-    }
-
-    //8.AcceptChallenges (Server->Client)
-
-    const handleChallengeAccept = async(payload,callback)=>{
-      try{
-        const eliteId = socket.user.id;
-        const {challengerId} = payload;
-
-        const requestKey=`round2:request:${challengerId}:${eliteId}`;
-        const requestData = await redis.get(requestKey);
-        if(!requestData)
-        {
-          return callback?.({success:false,message:"No active request found."});
-        }
-
-        //rechecking roles and status before assigning match
-        const [eliteRole, challengerRole] = await redis.mget(
-          `round2:role:${eliteId}`,
-          `round2:role:${challengerId}`
-        );
-
-        if (eliteRole !== "elite" || challengerRole !== "challenger") {
-          return callback?.({ success: false, message: "Invalid roles." });
-        }
-
-        const [eliteStatus, challengerStatus, eliteCooldown, challengerCooldown] = await Promise.all([
-        redis.get(`round2:status:${eliteId}`),
-        redis.get(`round2:status:${challengerId}`),
-        redis.exists(`round2:cooldown:${eliteId}`),
-        redis.exists(`round2:cooldown:${challengerId}`),
-      ]);
-
-        if (eliteStatus === "inMatch" || eliteCooldown) {
-          return callback?.({ success: false, message: "Elite unavailable." });
-        }
-        if (challengerStatus === "inMatch" || challengerCooldown) {
-          return callback?.({ success: false, message: "Challenger unavailable." });
-        }
-
-        const matchId=`match:${challengerId}:${eliteId}:${Date.now()}`;
-        const MATCH_DURATION_MS=20*60*1000;
-        const endTime = Date.now() + MATCH_DURATION_MS;
-
-        const allQuestions= await prisma.round2Questions.findMany();
-        const randomQuestion=allQuestions[Math.floor(Math.random()*allQuestions.length)];
-
-        await redis.multi()
-        .zrem(`round2:pending:${eliteId}`,challengerId) //removes accepted challenger from queue
-        .srem(`round2:outgoing:${challengerId}`, eliteId)
-        .del(requestKey)
-        .set(`round2:status:${challengerId}`, "inMatch", "EX", 2400)
-        .set(`round2:status:${eliteId}`, "inMatch", "EX", 2400)
-        .set(`round2:match:${matchId}`,JSON.stringify({challengerId,eliteId,createdAt:Date.now(),question:randomQuestion}),"EX",1200)
-        .mset(
-        `round2:userMatch:${challengerId}`, matchId,
-        `round2:userMatch:${eliteId}`, matchId)
-        .exec()
-
-        //auto-reject unaccepted requests
-        const pendingKey = `round2:pending:${eliteId}`;
-        const pending = await redis.zrange(pendingKey, 0, -1); 
-
-        for (const otherChallengerId of pending) 
-        {
-          if (otherChallengerId === challengerId) continue; 
-
-          const otherRequestKey = `round2:request:${otherChallengerId}:${eliteId}`;
-          const outgoingKey = `round2:outgoing:${otherChallengerId}`;
-
-          await redis
-          .multi()
-          .del(otherRequestKey)
-          .zrem(pendingKey, otherChallengerId)
-          .srem(outgoingKey, eliteId)
-          .exec();
-        
-          io.to(otherChallengerId).emit("round2:challengeRejected", {
-            eliteId,
-            challengerId: otherChallengerId,
-            reason: "Elite accepted another challenge",
-          });
-        }
-
-        socket.join(matchId); //adds elite
-        io.sockets.sockets.get(challengerId)?.join(matchId);//adds challenger
-
-        // notify acceptance + match start
-        io.to(matchId).emit("round2:challengeAccepted", { matchId, eliteId, challengerId });
-        io.to(matchId).emit("round2:matchStarted", {
-          matchId,
-          question: randomQuestion,
-          endTime,
-        });
-
-        callback?.({ success: true, message: "Challenge accepted.", matchId });
-      }catch(err){
-        console.error("Error in handleChallengeAccepted", err);
-        callback?.({ success: false, message: "Server error" });
-      }
-    }
-
-    //9.Reject Challenges (Server->Client)
-
-    const handleChallengeReject = async(payload,callback)=>{
-      try{
-        const eliteId=socket.user.id;
-        const {challengerId}=payload;
-
-        const requestKey=`round2:request:${challengerId}:${eliteId}`;
-        const requestData = await redis.get(requestKey);
-        if(!requestData)
-        {
-          return callback?.({success:false,message:"No active request found."});
-        }
-
-        await redis.multi()
-        .zrem(`round2:pending:${eliteId}`, challengerId)
-        .srem(`round2:outgoing:${challengerId}`, eliteId)
-        .del(requestKey)
-        .exec();
-
-        io.to(challengerId).emit("round2:challengeRejected", { eliteId });
-        return callback?.({ success: true, message: "Challenge rejected." });
-
-      }catch(err){
-        console.error("Error in handleChallengeRejected", err);
-        return callback?.({ success: false, message: "Server error" });
-      }
-    }
-
-    //10.Round2:disconnect
-    const handleDisconnect = async()=>{
-      const userId = socket.user.id;
-      if(!userId) return;
-
-      await redis.set(`round2:status:${userId}`,"disconnected");
-      const matchId=await redis.get(`round2:userMatch:${userId}`); //check if disconnected user was in match
-
-      if(matchId)
-      {
-        const matchData=JSON.parse(await redis.get(`round2:match:${matchId}`));
-        const opponentId = matchData.challengerId === userId ? matchData.eliteId : matchData.challengerId;
-
-        io.to(opponentId).emit("match:pause", { message: "Your opponent disconnected!" });
-      }
-    }
-
-    //11.Round2:reconnect
-    const handleReconnect = async(payload,callback)=>{
-      try{
-        const userId = socket.user.id;
-        const matchId = await redis.get(`round2:userMatch:${userId}`);
-        if (!matchId) return callback({ success: false, message: "No ongoing match" });
-
-        const matchData = JSON.parse(await redis.get(`round2:match:${matchId}`));
-        socket.join(matchId);
-        await redis.set(`round2:status:${userId}`, "inMatch");
-
-        const remainingTime = matchData.endTime - Date.now();
-        callback({ success: true, matchId, question: matchData.question, endTime: matchData.endTime, remainingTime });
-      }catch(err){
-        console.error("Error in handleReconnect", err);
-        callback({ success: false, message: "Server error" });
-      }
-    }
-
-    const MATCH_CHECK_INTERVAL = 5000; // check every 5s
-
-    setInterval(async () => {
-      const matchKeys = await redis.keys("round2:match:*");
-      const now = Date.now();
-
-      for (const key of matchKeys) {
-        const matchData = JSON.parse(await redis.get(key));
-        if (!matchData) continue;
-
-        if (now >= matchData.endTime) {
-          const { challengerId, eliteId } = matchData;
-
-          const scores = await redis.hgetall(`round2:scores:${key}`);
-          const challengerScore = parseInt(scores[challengerId] || 0, 10);
-          const eliteScore = parseInt(scores[eliteId] || 0, 10);  
-
-          const winner = challengerScore > eliteScore ? challengerId : eliteId;
-
-          // Emit results to the match room
-          io.to(key).emit("round2:matchResult", {
-            challengerScore,
-            eliteScore,
-            winner,
-          });
-
-      // Set cooldowns
-          await redis.setex(`round2:cooldown:${challengerId}`, 120, "1");
-          await redis.setex(`round2:cooldown:${eliteId}`, 120, "1");
-
-          io.to(key).emit("round2:cooldown", { duration: 120 });
-
-      // Clean up match and statuses
-          await redis.del(`round2:status:${challengerId}`);
-          await redis.del(`round2:status:${eliteId}`);
-          await redis.del(key);
-          await redis.del(`round2:scores:${key}`);
-
-          console.log(`Match ${key} finished → Challenger(${challengerScore}) vs Elite(${eliteScore})`);
-        }
-      }
-  }, MATCH_CHECK_INTERVAL);
-
-
-    //socket events
-    socket.on("client:sendMessage", handleClientMessage); 
-
-    //basic sockets
-    socket.on("round2:disconnect",handleDisconnect);
-    socket.on("round2:reconnect",handleReconnect);
-
-    //lobby sockets
-    socket.on("round2:Join",handleLobbyJoin); 
-    socket.on("round2:Start",handleStart); 
-
-    //bounty sockets
-    socket.on("round2:bountyStart",handleBountyStart); 
-    socket.on("round2:bountyProgress",bountyProgress); 
-    socket.on("bounty:questionStart",handleBountyBeginQuestion);
-    
-    //elite vs challenger sockets
-    socket.on("round2:challengeRequest",handleChallengeRequest);
-    socket.on("round2:challengeReject",handleChallengeReject);
-    socket.on("round2:challengeAccept",handleChallengeAccept);
   };
 
+  const handleBountyEnd = async (userId, questionId, isCorrect, submissionData) => {
+    try {
+      const sessionKey = keys.bountySession(userId, questionId);
+      const session = await redis.hgetall(sessionKey);
+      if (!session || session.status === 'completed' || session.status === 'timeout') return;
 
+      if (isCorrect) {
+        const isFirstSolver = await redis.sadd(keys.solvedBounties(), questionId) === 1;
+        submissionData.isFirstSolverBonus = isFirstSolver;
+        await prisma.submission.create({ data: submissionData });
+      }
 
+      await redis.multi()
+        .hset(sessionKey, "status", isCorrect ? "completed" : "attempted")
+        .del(keys.activeBounty(userId))
+        .exec();
+      io.to(userId).emit("round2:bountyEnded", { questionId, reason: isCorrect ? "completed" : "incorrect" });
+    } catch (err) {
+      console.error(`Error in handleBountyEnd for user ${userId}:`, err);
+    }
+  };
 
+  matchEndHandler = handleMatchEnd;
+  bountyEndHandler = handleBountyEnd;
+
+  // --- Socket Event Handlers (Listeners) ---
+
+  const handleLobbyJoin = async (callback) => {
+    try {
+      const userId = socket.user?.email;
+      if (!userId) return callback?.({ success: false, message: "Authentication error." });
+
+      socket.join('round2_lobby');
+      socket.join(userId);
+
+      const round2Status = await prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true }});
+      if (round2Status?.status !== 'LOBBY') {
+          return callback?.({ success: false, message: `Round 2 is not in lobby phase. Current status: ${round2Status?.status}` });
+      }
+
+      if (await redis.hget(keys.participants, userId)) {
+        await broadcastRoundState();
+        return callback?.({ success: true, message: "Rejoined lobby." });
+      }
+      
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) return callback?.({ success: false, message: "User not found." });
+      
+      const participant = { id: user.id, username: user.username || user.id.split('@')[0], status: 'lobby' };
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+      
+      await broadcastRoundState();
+      callback?.({ success: true, message: "Joined lobby successfully." });
+    } catch (err) {
+      console.error("Error in handleLobbyJoin:", err);
+      callback?.({ success: false, message: "Server error during join." });
+    }
+  };
+
+  const handleStart = async (callback) => {
+    try {
+      const adminUser = await prisma.user.findUnique({ where: {id: socket.user?.email }});
+      if (adminUser?.role !== 'ADMIN') return callback({ success: false, message: "Not authorized." });
+
+      await prisma.round.update({
+        where: { roundNumber: 2 },
+        data: { status: 'IN_PROGRESS' },
+      });
+      console.log("✅ Round 2 status updated to IN_PROGRESS in database.");
+
+      const endTime = Date.now() + ROUND_DURATION_MS;
+      await redis.multi().set(keys.roundStarted, "true").set(keys.roundEndTime, endTime).exec();
+
+      const participantsData = await redis.hgetall(keys.participants);
+      const players = Object.values(participantsData).map(p => JSON.parse(p)).sort(() => Math.random() - 0.5);
+      
+      const eliteCount = Math.ceil(players.length * 0.5);
+      const multi = redis.multi();
+      for (let i = 0; i < players.length; i++) {
+        const player = players[i];
+        const role = i < eliteCount ? "elite" : "challenger";
+        player.status = `${role}:idle`;
+        player.role = role;
+        
+        multi.hset(keys.participants, player.id, JSON.stringify(player));
+        multi.set(keys.role(player.id), role);
+        if (role === "elite") multi.sadd(keys.elites, player.id);
+        else multi.sadd(keys.challengers, player.id);
+
+        io.to(player.id).emit("round2:rolesAssigned", { role });
+      }
+      await multi.exec();
+
+      await broadcastRoundState();
+      callback({ success: true });
+    } catch (err) {
+      console.error("Error in handleStart:", err);
+      callback({ success: false, message: "Server error." });
+    }
+  };
+
+  const handleGetState = async (callback) => {
+     try {
+      const userId = socket.user?.email;
+      if (!userId) return callback?.({ success: false, message: "Authentication error." });
+
+      const [roundStarted, endTimeStr, participantStr, userMatchId] = await Promise.all([
+        redis.get(keys.roundStarted),
+        redis.get(keys.roundEndTime),
+        redis.hget(keys.participants, userId),
+        redis.get(keys.userMatch(userId)),
+      ]);
+
+      const participant = participantStr ? JSON.parse(participantStr) : null;
+      const shouldBeInGame = !!(participant?.role || userMatchId);
+
+      callback?.({
+        success: true,
+        state: {
+          roundIsActive: !!roundStarted,
+          roundEndTime: endTimeStr ? parseInt(endTimeStr) : null,
+          userRole: participant?.role || null,
+          userMatchId: userMatchId || null,
+          shouldBeInGame: shouldBeInGame,
+        }
+      });
+    } catch (err) {
+      console.error("Error in handleGetState:", err);
+      callback?.({ success: false, message: "Server error." });
+    }
+  };
+
+  const handleGetDashboardState = async (callback) => {
+    try {
+        const userId = socket.user?.email;
+        if (!userId) return callback?.({ success: false, message: "Authentication error." });
+
+        const [participantsData, allBountyQuestions, participantStr, userSubmissions, endTimeStr] = await Promise.all([
+            redis.hgetall(keys.participants),
+            prisma.problem.findMany({ where: { difficulty: 'R2_BOUNTY' } }),
+            redis.hget(keys.participants, userId),
+            prisma.submission.findMany({ where: { userId: userId, problem: { difficulty: 'R2_BOUNTY' }, status: 'ACCEPTED' } }),
+            redis.get(keys.roundEndTime)
+        ]);
+
+        if (!participantStr) {
+            return callback?.({ success: false, message: "You are not a participant in this round." });
+        }
+        
+        const solvedQuestionIds = new Set(userSubmissions.map(sub => sub.problemId));
+        const bountyQuestionsWithStatus = allBountyQuestions.map(q => ({
+            ...q,
+            isSolved: solvedQuestionIds.has(q.id)
+        }));
+        
+        const participants = Object.values(participantsData).map(p => JSON.parse(p));
+        const currentUser = JSON.parse(participantStr);
+        let incomingRequests = [];
+        if (currentUser.role === 'elite') {
+            const requestIds = await redis.smembers(keys.pendingRequests(userId));
+            incomingRequests = participants.filter(p => requestIds.includes(p.id));
+        }
+
+        const roundEndTime = endTimeStr ? parseInt(endTimeStr) : null;
+
+        callback?.({
+            success: true,
+            dashboard: {
+                allParticipants: participants,
+                bountyQuestions: bountyQuestionsWithStatus,
+                incomingRequests: incomingRequests,
+                roundEndTime: roundEndTime,
+            }
+        });
+
+    } catch (err) {
+        console.error("Error in handleGetDashboardState:", err);
+        callback?.({ success: false, message: "Server error fetching dashboard state." });
+    }
+  };
+  
+  const handleBountyBeginQuestion = async (payload, callback) => {
+    try {
+      const roundEndTimeStr = await redis.get(keys.roundEndTime);
+      if (!roundEndTimeStr) return callback({ success: false, message: "Round has not started." });
+      
+      const startTime = parseInt(roundEndTimeStr) - ROUND_DURATION_MS;
+      if (Date.now() < startTime + ACTION_LOCK_MS) {
+        return callback({ success: false, message: "Bounties are locked for the first 5 minutes." });
+      }
+
+      const userId = socket.user.email;
+      const { questionId } = payload;
+      const LEVEL_TIME_LIMIT_MS = { R2_BOUNTY: 20 * 60 * 1000 };
+      const question = await prisma.problem.findUnique({ where: { id: questionId } });
+      if (!question || question.difficulty !== 'R2_BOUNTY') {
+        return callback({ success: false, message: "Bounty question not found." });
+      }
+
+      const timeLimit = LEVEL_TIME_LIMIT_MS[question.difficulty];
+      const sessionStartTime = Date.now();
+      const sessionEndTime = sessionStartTime + timeLimit;
+      const sessionKey = keys.bountySession(userId, questionId);
+
+      await redis.multi()
+        .hset(sessionKey, {
+          status: "active",
+          questionId,
+          startTime: sessionStartTime,
+          endTime: sessionEndTime,
+          codeSnapshot: "",
+        })
+        .set(keys.activeBounty(userId), sessionKey)
+        .exec();
+
+      callback({ success: true, questionId, startTime: sessionStartTime, endTime: sessionEndTime });
+    } catch (err) {
+      console.error("Error in handleBountyBeginQuestion:", err);
+      callback({ success: false, message: "Could not start bounty." });
+    }
+  };
+  
+  const handleChallengeRequest = async (payload, callback) => {
+    try {
+        const challengerId = socket.user.email;
+        const { eliteId } = payload;
+
+        const [challengerRole, eliteRole, challengerStatus, eliteStatus, challengerCooldown, eliteCooldown, challengerDataStr] = await Promise.all([
+            redis.get(keys.role(challengerId)),
+            redis.get(keys.role(eliteId)),
+            redis.hget(keys.participants, challengerId).then(p => p ? JSON.parse(p).status : null),
+            redis.hget(keys.participants, eliteId).then(p => p ? JSON.parse(p).status : null),
+            redis.exists(keys.cooldown(challengerId)),
+            redis.exists(keys.cooldown(eliteId)),
+            redis.hget(keys.participants, challengerId)
+        ]);
+
+        if (challengerRole !== "challenger" || eliteRole !== "elite") return callback?.({ success: false, message: "Invalid roles for challenge." });
+        if (challengerStatus !== "challenger:idle" || eliteStatus !== "elite:idle") return callback?.({ success: false, message: "One or both players are not available." });
+        if (challengerCooldown || eliteCooldown) return callback?.({ success: false, message: "One or both players are in cooldown." });
+        if (!challengerDataStr) return callback?.({ success: false, message: "Could not find your participant data." });
+
+        const requestKey = keys.challengeRequest(challengerId, eliteId);
+        const setResult = await redis.set(requestKey, "true", "EX", 30, "NX");
+
+        if (!setResult) {
+            return callback?.({ success: false, message: "Request already sent." });
+        }
+        
+        await redis.multi()
+            .sadd(keys.pendingRequests(eliteId), challengerId)
+            .sadd(keys.outgoingRequests(challengerId), eliteId)
+            .exec();
+
+        const challenger = JSON.parse(challengerDataStr);
+        io.to(eliteId).emit("round2:challengeIncoming", { challenger });
+        callback?.({ success: true, message: "Challenge request sent." });
+    } catch (err) {
+        console.error("Error in handleChallengeRequest:", err);
+        callback({ success: false, message: "Server error" });
+    }
+  };
+  
+  const handleChallengeAccept = async (payload, callback) => {
+    try {
+        const eliteId = socket.user.email;
+        const { challengerId } = payload;
+        const requestKey = keys.challengeRequest(challengerId, eliteId);
+        if (!(await redis.exists(requestKey))) {
+            return callback?.({ success: false, message: "Request expired or invalid." });
+        }
+
+        const multi = redis.multi().del(requestKey).srem(keys.pendingRequests(eliteId), challengerId);
+        const [delResult] = await multi.exec();
+
+        if (delResult === 0) return callback?.({ success: false, message: "Could not accept, request already handled." });
+        
+        await redis.del(keys.rejectCount(eliteId));
+
+        const question = await prisma.problem.findFirst({ where: { difficulty: 'R2_CHALLENGE' }});
+        const matchId = `match:${challengerId}:${eliteId}:${Date.now()}`;
+        const endTime = Date.now() + MATCH_DURATION_MS;
+
+        await redis.set(keys.matchInfo(matchId), JSON.stringify({ challengerId, eliteId, question, startTime: Date.now(), endTime }), "EX", MATCH_DURATION_MS + 60);
+        
+        for (const userId of [challengerId, eliteId]) {
+            const pStr = await redis.hget(keys.participants, userId);
+            const p = JSON.parse(pStr);
+            p.status = 'in-match';
+            await redis.hset(keys.participants, userId, JSON.stringify(p));
+            await redis.set(keys.userMatch(userId), matchId);
+        }
+
+        const challengerSocket = (await io.in(challengerId).allSockets()).values().next().value;
+        if (challengerSocket) io.sockets.sockets.get(challengerSocket)?.join(matchId);
+        socket.join(matchId);
+
+        io.to(matchId).emit("round2:matchStarted", { matchId, question, endTime, players: { challengerId, eliteId } });
+        callback?.({ success: true, matchId });
+        await broadcastRoundState();
+    } catch (err) {
+        console.error("Error in handleChallengeAccept:", err);
+        callback?.({ success: false, message: "Server error." });
+    }
+  };
+
+  const handleChallengeReject = async (payload, callback) => {
+    try {
+        const eliteId = socket.user.email;
+        const { challengerId } = payload;
+        await redis.multi()
+            .del(keys.challengeRequest(challengerId, eliteId))
+            .srem(keys.pendingRequests(eliteId), challengerId)
+            .srem(keys.outgoingRequests(challengerId), eliteId)
+            .exec();
+
+        const rejectCount = await redis.incr(keys.rejectCount(eliteId));
+        if (rejectCount >= 3) {
+            await prisma.user.update({
+                where: { id: eliteId },
+                data: { eventScore: { decrement: 20 } }
+            });
+            await redis.del(keys.rejectCount(eliteId));
+            io.to(eliteId).emit('round2:info', { message: "You lost 20 points for rejecting 3 challenges." });
+        }
+        
+        io.to(challengerId).emit("round2:challengeRejected", { eliteId });
+        callback?.({ success: true, message: "Challenge rejected." });
+    } catch (err) {
+        console.error("Error in handleChallengeReject:", err);
+        callback?.({ success: false, message: "Server error." });
+    }
+  };
+
+  const handleGetCodePageState = async (payload, callback) => {
+      try {
+        const { contextId, sessionType } = payload;
+        const userId = socket.user.email;
+
+        if (sessionType === 'match') {
+            const matchDataStr = await redis.get(keys.matchInfo(contextId));
+            if (!matchDataStr) return callback({ success: false, message: "Match not found." });
+            const matchData = JSON.parse(matchDataStr);
+            const opponentId = matchData.challengerId === userId ? matchData.eliteId : matchData.challengerId;
+            const opponentDataStr = await redis.hget(keys.participants, opponentId);
+            const opponentData = opponentDataStr ? JSON.parse(opponentDataStr) : { username: 'Unknown' };
+            
+            const question = await prisma.problem.findUnique({ where: { id: matchData.question.id }});
+
+            callback({ success: true, sessionData: {
+                type: 'match',
+                opponent: { id: opponentId, username: opponentData.username },
+                question: question,
+                endTime: matchData.endTime,
+            }});
+
+        } else if (sessionType === 'bounty') {
+            const questionId = contextId;
+            const sessionKey = keys.bountySession(userId, questionId);
+            const bountySession = await redis.hgetall(sessionKey);
+            if (!bountySession.status) return callback({ success: false, message: "Bounty session not found." });
+            
+            const question = await prisma.problem.findUnique({ where: { id: questionId } });
+            
+            callback({ success: true, sessionData: {
+                type: 'bounty',
+                question: question,
+                endTime: parseInt(bountySession.endTime),
+            }});
+        } else {
+            callback({ success: false, message: "Invalid session type." });
+        }
+      } catch(err) {
+          console.error("Error in getCodePageState:", err);
+          callback({ success: false, message: "Server error getting session." });
+      }
+  };
+  
+  const handleDisconnect = async () => {
+    try {
+      const userId = socket.user?.email;
+      if (!userId) return;
+      console.log(`User ${userId} disconnected.`);
+      const matchId = await redis.get(keys.userMatch(userId));
+      if (matchId) {
+        const matchDataStr = await redis.get(keys.matchInfo(matchId));
+        if (!matchDataStr) return;
+        const matchData = JSON.parse(matchDataStr);
+        const winnerId = matchData.challengerId === userId ? matchData.eliteId : matchData.challengerId;
+        await handleMatchEnd(matchId, winnerId, "disconnect");
+      }
+    } catch (err) {
+      console.error(`Error on disconnect for ${socket.user?.email}:`, err);
+    }
+  };
+
+  // --- Register all socket listeners ---
+  socket.on("round2:join", handleLobbyJoin);
+  socket.on("round2:start", handleStart);
+  socket.on("round2:getState", handleGetState);
+  socket.on("disconnect", handleDisconnect);
+  socket.on("round2:getDashboardState", handleGetDashboardState);
+  socket.on("round2:getCodePageState", handleGetCodePageState);
+  socket.on("round2:bountyBeginQuestion", handleBountyBeginQuestion);
+  socket.on("round2:challengeRequest", handleChallengeRequest);
+  socket.on("round2:challengeAccept", handleChallengeAccept);
+  socket.on("round2:challengeReject", handleChallengeReject);
+};
+
+export const getRound2Handlers = () => ({
+  matchEndHandler,
+  bountyEndHandler,
+});

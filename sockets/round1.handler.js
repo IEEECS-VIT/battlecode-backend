@@ -166,63 +166,92 @@ export const round1Handler = (io, socket) => {
         }
     };
 
-    const getQuestionByDifficulty = async (difficulty) => {
-        const problems = await prisma.problem.findMany({ where: { roundId: 1, difficulty } });
-        return problems.length > 0 ? problems[Math.floor(Math.random() * problems.length)] : null;
-    };
-    
-    const createMatch = async (player1, player2, difficulty) => {
-        const question = await getQuestionByDifficulty(difficulty);
-        if (!question) return console.error(`No question for ${difficulty}. Cannot create match.`);
-
-        let timerDuration;
-        if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
-        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
-        else timerDuration = 15 * 60 * 1000;
-
-        try {
-            const newMatch = await prisma.match.create({ data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' } });
-            const matchId = newMatch.id;
-            const startTime = Date.now();
-            const keys = getRedisKeys();
-            const matchDetails = { id: matchId, players: [player1.id, player2.id], problemId: question.id, startTime, duration: timerDuration, difficulty, isPaused: false, timePaused: 0 };
-
-            await redis.multi()
-                .hset(keys.matches, matchId, JSON.stringify(matchDetails))
-                .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
-                .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
-                .exec();
-
-            const matchRoom = `match:${matchId}`;
-            const matchPayload = { question: question, startTime, duration: timerDuration };
-            
-            io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
-            io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
-            
-            const [socket1] = await io.in(`user:${player1.id}`).allSockets();
-            const [socket2] = await io.in(`user:${player2.id}`).allSockets();
-            if(socket1) io.sockets.sockets.get(socket1)?.join(matchRoom);
-            if(socket2) io.sockets.sockets.get(socket2)?.join(matchRoom);
-            
-            const timerInterval = setInterval(async () => {
-                const currentMatchStr = await redis.hget(getRedisKeys().matches, matchId);
-                if (!currentMatchStr) return clearInterval(timerInterval);
-                const currentMatch = JSON.parse(currentMatchStr);
-                if (currentMatch.isPaused) return;
-                const elapsed = (Date.now() - currentMatch.startTime) - currentMatch.timePaused;
-                const timeRemaining = Math.max(0, Math.floor((currentMatch.duration - elapsed) / 1000));
-                io.to(matchRoom).emit('round1:timerUpdate', { timeRemaining });
-                if (timeRemaining <= 0) {
-                    clearInterval(timerInterval);
-                    handleMatchEnd(matchId, null);
-                }
-            }, 1000);
-            
-            console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
-        } catch (error) {
-            console.error("[Create Match Error]", error);
+const getUnattemptedQuestionByDifficulty = async (difficulty, player1Id, player2Id) => {
+    const submissions = await prisma.submission.findMany({
+        where: {
+            userId: { in: [player1Id, player2Id] }
+        },
+        distinct: ['problemId'],
+        select: {
+            problemId: true
         }
-    };
+    });
+
+    const attemptedProblemIds = submissions.map(s => s.problemId);
+
+    const unattemptedProblems = await prisma.problem.findMany({
+        where: {
+            roundId: 1,
+            difficulty,
+            id: {
+                notIn: attemptedProblemIds
+            }
+        }
+    });
+
+    if (unattemptedProblems.length > 0) {
+        return unattemptedProblems[Math.floor(Math.random() * unattemptedProblems.length)];
+    }
+
+    return null;
+};
+
+const createMatch = async (player1, player2, difficulty) => {
+    const question = await getUnattemptedQuestionByDifficulty(difficulty, player1.id, player2.id);
+    
+    if (!question) {
+        console.error(`No unattempted question for ${difficulty} available. Cannot create match.`);
+        return;
+    }
+
+    let timerDuration;
+    if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
+    else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
+    else timerDuration = 15 * 60 * 1000;
+
+    try {
+        const newMatch = await prisma.match.create({ data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' } });
+        const matchId = newMatch.id;
+        const startTime = Date.now();
+        const keys = getRedisKeys();
+        const matchDetails = { id: matchId, players: [player1.id, player2.id], problemId: question.id, startTime, duration: timerDuration, difficulty, isPaused: false, timePaused: 0 };
+
+        await redis.multi()
+            .hset(keys.matches, matchId, JSON.stringify(matchDetails))
+            .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
+            .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
+            .exec();
+
+        const matchRoom = `match:${matchId}`;
+        const matchPayload = { question, startTime, duration: timerDuration };
+        
+        io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
+        io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
+        
+        const [socket1] = await io.in(`user:${player1.id}`).allSockets();
+        const [socket2] = await io.in(`user:${player2.id}`).allSockets();
+        if(socket1) io.sockets.sockets.get(socket1)?.join(matchRoom);
+        if(socket2) io.sockets.sockets.get(socket2)?.join(matchRoom);
+        
+        const timerInterval = setInterval(async () => {
+            const currentMatchStr = await redis.hget(getRedisKeys().matches, matchId);
+            if (!currentMatchStr) return clearInterval(timerInterval);
+            const currentMatch = JSON.parse(currentMatchStr);
+            if (currentMatch.isPaused) return;
+            const elapsed = (Date.now() - currentMatch.startTime) - currentMatch.timePaused;
+            const timeRemaining = Math.max(0, Math.floor((currentMatch.duration - elapsed) / 1000));
+            io.to(matchRoom).emit('round1:timerUpdate', { timeRemaining });
+            if (timeRemaining <= 0) {
+                clearInterval(timerInterval);
+                handleMatchEnd(matchId, null);
+            }
+        }, 1000);
+        
+        console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
+    } catch (error) {
+        console.error("[Create Match Error]", error);
+    }
+};
 
     // MODIFIED: This function now uses live eventScore for matchmaking
     const runMatchmakingCycle = async () => {

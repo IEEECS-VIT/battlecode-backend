@@ -16,7 +16,7 @@ export const ScoreRound0 = (totalcases, passedcases, submits) => {
 
 };
 
-export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win)=>{
+export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win, submits)=>{
     //test case - 30%
     // win - 40%
     //submit - 10%
@@ -44,7 +44,7 @@ export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win)
     if (win){
         current_score += (max_score * 0.4);
     }
-    if (submit <= 3){
+    if (submits <= 3){
         current_score += (max_score * 0.1);
     }
     var time_formula = max_score * 0.2 * Math.exp(-0.00256 * (total_time - time_left));
