@@ -27,39 +27,50 @@ const getRedisKeys = () => ({
     startTime: `round${ROUND_NUMBER}:status:startTime`,
 });
 
+// --- NEW HELPER FUNCTION ---
+// Gets all participants from Redis and enriches them with live rank/score data from Prisma.
+const getEnrichedParticipantsList = async () => {
+    const keys = getRedisKeys();
+    const allParticipantsData = await redis.hgetall(keys.participants);
+
+    if (Object.keys(allParticipantsData).length === 0) {
+        return [];
+    }
+
+    const participantIds = Object.keys(allParticipantsData);
+    // Fetch users from DB to get the latest score and username for ranking
+    const usersFromDb = await prisma.user.findMany({
+        where: { id: { in: participantIds } },
+        select: { id: true, eventScore: true, username: true },
+        orderBy: [{ eventScore: 'desc' }, { username: 'asc' }]
+    });
+
+    const scoreMap = new Map(usersFromDb.map(u => [u.id, u.eventScore]));
+    const rankMap = new Map(usersFromDb.map((u, i) => [u.id, i + 1]));
+    const usernameMap = new Map(usersFromDb.map(u => [u.id, u.username]));
+
+    // Enrich the Redis data with fresh DB data
+    const participantsList = Object.values(allParticipantsData).map(pStr => {
+        const p = JSON.parse(pStr);
+        p.eventScore = scoreMap.get(p.id) ?? p.eventScore ?? 0;
+        p.rank = rankMap.get(p.id) ?? 999;
+        p.username = usernameMap.get(p.id) ?? p.username;
+        return p;
+    }).sort((a, b) => a.rank - b.rank); // Sort by the new rank
+
+    return participantsList;
+};
+
 
 const broadcastLobbyUpdate = async (io) => {
     try {
+        // Use the new helper function to get consistent, enriched data
+        const participantsList = await getEnrichedParticipantsList();
         const keys = getRedisKeys();
-        const allParticipantsData = await redis.hgetall(keys.participants);
-        if (Object.keys(allParticipantsData).length === 0) {
-            io.emit('round1:participantsUpdate', { participants: [] });
-            return;
-        }
-
-        const participantIds = Object.keys(allParticipantsData);
-        const usersFromDb = await prisma.user.findMany({
-            where: { id: { in: participantIds } },
-            select: { id: true, eventScore: true },
-            orderBy: [{ eventScore: 'desc' }, { username: 'asc' }]
-        });
-        
-        const scoreMap = new Map(usersFromDb.map(u => [u.id, u.eventScore]));
-        const rankMap = new Map(usersFromDb.map((u, i) => [u.id, i + 1]));
-
-        const participantsList = Object.values(allParticipantsData).map(pStr => {
-            const p = JSON.parse(pStr);
-            p.eventScore = scoreMap.get(p.id) ?? p.eventScore ?? 0;
-            p.rank = rankMap.get(p.id) ?? p.rank;
-            return p;
-        }).sort((a, b) => a.rank - b.rank);
-
-
         const currentStatus = await redis.get(keys.status);
 
         io.emit('lobby:round1', { 
             participants: participantsList.filter(p => p.status === 'lobby'), 
-            totalParticipants: participantsList.filter(p => p.status === 'lobby').length,
             isActive: currentStatus === "running" 
         });
         io.emit('round1:participantsUpdate', { participants: participantsList });
@@ -79,7 +90,6 @@ const startJanitor = (io) => {
         try {
             const keys = getRedisKeys();
             
-            // Janitor for expired cooldowns
             const allParticipantsData = await redis.hgetall(keys.participants);
             let hasCooldownUpdates = false;
             for (const userId in allParticipantsData) {
@@ -139,7 +149,6 @@ export const round1Handler = (io, socket) => {
 
         await prisma.match.update({ where: { id: matchId }, data: { status: 'COMPLETED', winnerId } }).catch(err => console.log(`Prisma update failed for match ${matchId}, might be a bot match.`));
 
-
         const playersFromDb = await prisma.user.findMany({
             where: { id: { in: match.players } },
             select: { id: true, eventScore: true }
@@ -151,15 +160,12 @@ export const round1Handler = (io, socket) => {
             const playerStr = await redis.hget(keys.participants, playerId);
             if (!playerStr) continue;
 
-
             const player = JSON.parse(playerStr);
             player.status = 'cooldown';
             player.cooldownEndTime = Date.now() + COOLDOWN_DURATION;
             player.eventScore = scoreMap.get(playerId) ?? player.eventScore;
 
-
             await redis.hset(keys.participants, playerId, JSON.stringify(player));
-
 
             io.to(`user:${playerId}`).emit('round1:matchEnd', { type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout' });
             io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
@@ -167,140 +173,116 @@ export const round1Handler = (io, socket) => {
     };
 
 
-const getUnattemptedQuestionByDifficulty = async (difficulty, player1Id, player2Id) => {
-    const submissions = await prisma.submission.findMany({
-        where: { userId: { in: [player1Id, player2Id] } },
-        distinct: ['problemId'],
-        select: { problemId: true }
-    });
+    const getUnattemptedQuestionByDifficulty = async (difficulty, player1Id, player2Id) => {
+        const submissions = await prisma.submission.findMany({
+            where: { userId: { in: [player1Id, player2Id] } },
+            distinct: ['problemId'],
+            select: { problemId: true }
+        });
 
+        const attemptedProblemIds = submissions.map(s => s.problemId);
 
-    const attemptedProblemIds = submissions.map(s => s.problemId);
-
-
-    const unattemptedProblems = await prisma.problem.findMany({
-        where: {
-            roundId: 1,
-            difficulty,
-            id: { notIn: attemptedProblemIds }
-        }
-    });
-
-
-    if (unattemptedProblems.length > 0) {
-        return unattemptedProblems[Math.floor(Math.random() * unattemptedProblems.length)];
-    }
-
-    return null;
-};
-
-
-const createMatch = async (player1, player2, difficulty) => {
-    const question = await getUnattemptedQuestionByDifficulty(difficulty, player1.id, player2.id);
-    
-    if (!question) {
-        console.error(`No unattempted question for ${difficulty} available. Cannot create match.`);
-        return;
-    }
-
-
-    let timerDuration;
-    if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
-    else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
-    else timerDuration = 15 * 60 * 1000;
-
-
-    try {
-        const newMatch = await prisma.match.create({ data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' } });
-        const matchId = newMatch.id;
-        const startTime = Date.now();
-        const keys = getRedisKeys();
-        const matchDetails = { id: matchId, players: [player1.id, player2.id], problemId: question.id, startTime, duration: timerDuration, difficulty };
-
-
-        await redis.multi()
-            .hset(keys.matches, matchId, JSON.stringify(matchDetails))
-            .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
-            .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
-            .exec();
-
-
-        const matchRoom = `match:${matchId}`;
-        const matchPayload = { question, startTime, duration: timerDuration };
-        
-        io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
-        io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
-        
-        const [socket1] = await io.in(`user:${player1.id}`).allSockets();
-        const [socket2] = await io.in(`user:${player2.id}`).allSockets();
-        if(socket1) io.sockets.sockets.get(socket1)?.join(matchRoom);
-        if(socket2) io.sockets.sockets.get(socket2)?.join(matchRoom);
-        
-        const timerInterval = setInterval(async () => {
-            const currentMatchStr = await redis.hget(getRedisKeys().matches, matchId);
-            if (!currentMatchStr) return clearInterval(timerInterval);
-            const currentMatch = JSON.parse(currentMatchStr);
-            
-            const elapsed = Date.now() - currentMatch.startTime;
-            const timeRemaining = Math.max(0, Math.floor((currentMatch.duration - elapsed) / 1000));
-            
-            // This event is now redundant for the main client, but harmless to keep for other purposes.
-            io.to(matchRoom).emit('round1:timerUpdate', { timeRemaining });
-            
-            if (timeRemaining <= 0) {
-                clearInterval(timerInterval);
-                handleMatchEnd(matchId, null);
+        const unattemptedProblems = await prisma.problem.findMany({
+            where: {
+                roundId: 1,
+                difficulty,
+                id: { notIn: attemptedProblemIds }
             }
-        }, 1000);
+        });
+
+        if (unattemptedProblems.length > 0) {
+            return unattemptedProblems[Math.floor(Math.random() * unattemptedProblems.length)];
+        }
+
+        return null;
+    };
+
+
+    const createMatch = async (player1, player2, difficulty) => {
+        const question = await getUnattemptedQuestionByDifficulty(difficulty, player1.id, player2.id);
         
-        console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
-    } catch (error) {
-        console.error("[Create Match Error]", error);
-    }
-};
+        if (!question) {
+            console.error(`No unattempted question for ${difficulty} available. Cannot create match.`);
+            return;
+        }
+
+
+        let timerDuration;
+        if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
+        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
+        else timerDuration = 15 * 60 * 1000;
+
+
+        try {
+            const newMatch = await prisma.match.create({ data: { playerAId: player1.id, playerBId: player2.id, problemId: question.id, status: 'ONGOING' } });
+            const matchId = newMatch.id;
+            const startTime = Date.now();
+            const keys = getRedisKeys();
+            const matchDetails = { id: matchId, players: [player1.id, player2.id], problemId: question.id, startTime, duration: timerDuration, difficulty };
+
+
+            await redis.multi()
+                .hset(keys.matches, matchId, JSON.stringify(matchDetails))
+                .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
+                .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
+                .exec();
+
+
+            const matchRoom = `match:${matchId}`;
+            const matchPayload = { question, startTime, duration: timerDuration };
+            
+            io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
+            io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
+            
+            const [socket1] = await io.in(`user:${player1.id}`).allSockets();
+            const [socket2] = await io.in(`user:${player2.id}`).allSockets();
+            if(socket1) io.sockets.sockets.get(socket1)?.join(matchRoom);
+            if(socket2) io.sockets.sockets.get(socket2)?.join(matchRoom);
+            
+            const timerInterval = setInterval(async () => {
+                const currentMatchStr = await redis.hget(getRedisKeys().matches, matchId);
+                if (!currentMatchStr) return clearInterval(timerInterval);
+                const currentMatch = JSON.parse(currentMatchStr);
+                
+                const elapsed = Date.now() - currentMatch.startTime;
+                const timeRemaining = Math.max(0, Math.floor((currentMatch.duration - elapsed) / 1000));
+                
+                io.to(matchRoom).emit('round1:timerUpdate', { timeRemaining });
+                
+                if (timeRemaining <= 0) {
+                    clearInterval(timerInterval);
+                    handleMatchEnd(matchId, null);
+                }
+            }, 1000);
+            
+            console.log(`[Match Created] ${matchId} between ${player1.id} and ${player2.id}`);
+        } catch (error) {
+            console.error("[Create Match Error]", error);
+        }
+    };
 
 
     const runMatchmakingCycle = async () => {
         const keys = getRedisKeys();
-        const allParticipantsData = await redis.hgetall(keys.participants);
-        const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+        const allParticipants = await getEnrichedParticipantsList();
 
+        const waitingPlayers = allParticipants.filter(p => p.status === 'waiting');
 
-        const waitingPlayerIds = allParticipants
-            .filter(p => p.status === 'waiting')
-            .map(p => p.id);
-
-
-        if (waitingPlayerIds.length < 2) return;
-        console.log(`[Matchmaking] Running cycle with ${waitingPlayerIds.length} players waiting.`);
-
+        if (waitingPlayers.length < 2) return;
+        console.log(`[Matchmaking] Running cycle with ${waitingPlayers.length} players waiting.`);
 
         try {
-            const playersWithLiveScores = await prisma.user.findMany({
-                where: { id: { in: waitingPlayerIds } },
-                select: { id: true, username: true, eventScore: true },
-                orderBy: { eventScore: 'desc' }
-            });
-
-
-            let waitingPlayers = playersWithLiveScores;
-            if (waitingPlayers.length < 2) return;
-
-
             const third = Math.ceil(waitingPlayers.length / 3);
             let g1 = waitingPlayers.slice(0, third);
             let g2 = waitingPlayers.slice(third, 2 * third);
             let g3 = waitingPlayers.slice(2 * third);
 
-
             if (g1.length % 2 !== 0 && g2.length > 0) g2.unshift(g1.pop());
             if (g2.length % 2 !== 0 && g3.length > 0) g3.unshift(g2.pop());
-
 
             const groups = [g1, g2, g3];
             const difficulties = ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'];
             const matchPromises = [];
-
 
             const matchedPlayerIds = new Set();
             groups.forEach((group, index) => {
@@ -313,22 +295,21 @@ const createMatch = async (player1, player2, difficulty) => {
                 }
             });
 
-
-            const multi = redis.multi();
-            const allRedisParticipants = await redis.hgetall(keys.participants);
-            for (const playerId of matchedPlayerIds) {
-                if (allRedisParticipants[playerId]) {
-                    const participant = JSON.parse(allRedisParticipants[playerId]);
-                    participant.status = 'in-match';
-                    multi.hset(keys.participants, playerId, JSON.stringify(participant));
+            if (matchedPlayerIds.size > 0) {
+                const multi = redis.multi();
+                const allRedisParticipants = await redis.hgetall(keys.participants);
+                for (const playerId of matchedPlayerIds) {
+                    if (allRedisParticipants[playerId]) {
+                        const participant = JSON.parse(allRedisParticipants[playerId]);
+                        participant.status = 'in-match';
+                        multi.hset(keys.participants, playerId, JSON.stringify(participant));
+                    }
                 }
+                await multi.exec();
             }
-            await multi.exec();
-
 
             await Promise.all(matchPromises);
             await broadcastLobbyUpdate(io);
-
 
         } catch (error) {
             console.error("[Matchmaking Error]", error);
@@ -475,27 +456,25 @@ const createMatch = async (player1, player2, difficulty) => {
     });
 
 
+    // --- REFACTORED getState HANDLER ---
     socket.on('round1:getState', async (payload, callback) => {
         const { userId, error } = validateUser();
         if (error) return callback?.({ success: false, error });
 
-
         socket.join(`user:${userId}`);
-
 
         try {
             const keys = getRedisKeys();
-            const participantStr = await redis.hget(keys.participants, userId);
-            
-            if (!participantStr) {
-                const allParticipantsData = await redis.hgetall(keys.participants);
-                const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
+            // Get the full, fresh list of all participants
+            const allParticipants = await getEnrichedParticipantsList();
+            let participant = allParticipants.find(p => p.id === userId) || null;
+
+            if (!participant) {
+                // If the user isn't a participant yet, return the list so the lobby can still be displayed
                 return callback?.({ success: true, participant: null, allParticipants });
             }
-            
-            let participant = JSON.parse(participantStr);
 
-
+            // Handle logic for existing participants
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
                 participant.status = 'waiting';
@@ -505,8 +484,11 @@ const createMatch = async (player1, player2, difficulty) => {
             }
             
             if (participant.socketId !== socket.id) {
-                participant.socketId = socket.id;
-                await redis.hset(keys.participants, userId, JSON.stringify(participant));
+                // Update the participant object in Redis with the new socket ID for this connection
+                const redisParticipant = JSON.parse(await redis.hget(keys.participants, userId));
+                redisParticipant.socketId = socket.id;
+                await redis.hset(keys.participants, userId, JSON.stringify(redisParticipant));
+                participant.socketId = socket.id; // Update for the response object
             }
             
             let matchDataForClient = null;
@@ -519,12 +501,11 @@ const createMatch = async (player1, player2, difficulty) => {
                         
                         const question = await prisma.problem.findUnique({ where: { id: match.problemId }});
                         const opponentId = match.players.find(pId => pId !== userId);
-                        const opponentStr = opponentId ? await redis.hget(keys.participants, opponentId) : null;
-                        const opponent = opponentStr ? JSON.parse(opponentStr) : { id: opponentId, rank: 'N/A' };
+                        const opponent = opponentId ? allParticipants.find(p => p.id === opponentId) : null;
 
                         matchDataForClient = {
-                            question: question,
-                            opponent: { id: opponent.id, rank: opponent.rank },
+                            question,
+                            opponent: opponent ? { id: opponent.id, rank: opponent.rank } : { id: opponentId, rank: 'N/A' },
                             startTime: match.startTime,
                             duration: match.duration,
                         };
@@ -533,9 +514,6 @@ const createMatch = async (player1, player2, difficulty) => {
                 }
             }
 
-
-            const allParticipantsData = await redis.hgetall(keys.participants);
-            const allParticipants = Object.values(allParticipantsData).map(p => JSON.parse(p));
             const currentStatus = await redis.get(keys.status);
             const startTimeStr = await redis.get(keys.startTime);
             const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
