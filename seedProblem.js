@@ -1,15 +1,11 @@
 import prisma from "./config/prisma.js";
 
 async function main() {
-  console.log('Start seeding for Two Sum problem...');
+  console.log("Start seeding for LC-70 problem...");
 
   // 1. Upsert Categories
-  const categoriesData = [
-    { name: 'Array' },
-    { name: 'Hash Table' },
-  ];
-
-  const categoryUpserts = categoriesData.map(cat => 
+  const categoriesData = [{ name: "Dynamic Programming" }, { name: "Math" }, { name: "Fibonacci" }];
+  const categoryUpserts = categoriesData.map((cat) =>
     prisma.category.upsert({
       where: { name: cat.name },
       update: {},
@@ -17,73 +13,113 @@ async function main() {
     })
   );
   const categories = await Promise.all(categoryUpserts);
-  console.log('Categories seeded:', categories.map(c => c.name).join(', '));
-  
-  const categoryIds = categories.map(c => ({ id: c.id }));
+  console.log("Categories seeded:", categories.map((c) => c.name).join(", "));
 
-  // 2. Get Round 0 (assuming it already exists)
+  const categoryIds = categories.map((c) => ({ id: c.id }));
+
+  // 2. Get Round 1 (assuming it already exists)
   const round = await prisma.round.findUnique({
-    where: { roundNumber: 0 },
+    where: { roundNumber: 1 },
   });
-  
+
   if (!round) {
-    throw new Error('Round 0 not found in database. Please ensure rounds are seeded first.');
+    throw new Error("Round 1 not found in database. Please ensure rounds are seeded first.");
   }
-  
+
   console.log(`Using existing Round ${round.roundNumber}.`);
 
   // 3. Define the Problem Data
-  const problemTitle = "Two Sum";
+  const problemTitle = "Climbing Stairs"; // LC-70
   const problemData = {
     title: problemTitle,
-    description: "Given an array of integers `nums` and an integer `target`, return indices of the two numbers such that they add up to `target`.\n\nYou may assume that each input would have exactly one solution, and you may not use the same element twice.\n\nYou can return the answer in any order.",
-    difficulty: 'R0',
+    description:
+      "You are climbing a staircase with n steps. Each time you can either climb 1 or 2 steps. " +
+      "Return the number of distinct ways to reach the top.\n\n" +
+      "Input Format:\n" +
+      "A single integer n.\n\n" +
+      "Output Format:\n" +
+      "A single integer: the number of distinct ways to climb to the top.\n",
+    difficulty: "R1_EASY",
     constraints: [
-      "2 <= nums.length <= 10^4",
-      "-10^9 <= nums[i] <= 10^9",
-      "-10^9 <= target <= 10^9",
-      "Only one valid answer exists.",
+      "1 <= n <= 45",
     ],
     hints: [
-      "A brute-force approach would involve checking every pair of elements.",
-      "Can you use a hash map to optimize the search for the complement of each element?"
+      "Let f[i] be ways to reach step i; then f[i] = f[i-1] + f[i-2] with f[0]=1, f[1]=1.",
+      "Space-opt: keep only the last two values while iterating up to n.",
+      "This is the Fibonacci sequence shifted by one index.",
     ],
     boilerplate: {
-      cpp: "#include <iostream>\n#include <vector>\n#include <string>\n#include <sstream>\n#include <unordered_map>\n\nusing namespace std;\n\nvector<int> twoSum(vector<int>& nums, int target) {\n    // Your code here\n}\n\nint main() {\n    ios_base::sync_with_stdio(false);\n    cin.tie(NULL);\n\n    string line;\n    \n    // Read the array line\n    getline(cin, line);\n    stringstream ss(line);\n    int num;\n    vector<int> nums;\n    while (ss >> num) {\n        nums.push_back(num);\n    }\n\n    // Read the target line\n    int target;\n    cin >> target;\n\n    vector<int> result = twoSum(nums, target);\n\n    cout << \"[\" << result[0] << \",\" << result[1] << \"]\" << endl;\n\n    return 0;\n}",
-      c: "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n/**\n * Note: The returned array must be malloced, assume caller calls free().\n */\nint* twoSum(int* nums, int numsSize, int target, int* returnSize) {\n    // Your code here\n    *returnSize = 0;\n    return NULL;\n}\n\nint* parse_input_nums(char* line, int* count) {\n    int capacity = 10;\n    int* nums = malloc(capacity * sizeof(int));\n    int i = 0;\n    char* token = strtok(line, \" \\t\\n\");\n    while (token != NULL) {\n        if (i >= capacity) {\n            capacity *= 2;\n            nums = realloc(nums, capacity * sizeof(int));\n        }\n        nums[i++] = atoi(token);\n        token = strtok(NULL, \" \\t\\n\");\n    }\n    *count = i;\n    return nums;\n}\n\nint main() {\n    char line[100000];\n    \n    fgets(line, sizeof(line), stdin);\n    char* newline = strchr(line, '\\n');\n    if (newline) *newline = '\\0';\n    \n    int numsSize = 0;\n    int* nums = parse_input_nums(line, &numsSize);\n\n    int target;\n    scanf(\"%d\", &target);\n    \n    int returnSize = 0;\n    int* result = twoSum(nums, numsSize, target, &returnSize);\n\n    if (result != NULL && returnSize == 2) {\n        printf(\"[%d,%d]\\n\", result[0], result[1]);\n        free(result);\n    } else {\n        printf(\"[]\\n\");\n    }\n\n    free(nums);\n    \n    return 0;\n}",
-      python: "import sys\n\nclass Solution:\n    def twoSum(self, nums: list[int], target: int) -> list[int]:\n        # Your code here\n        pass\n\nif __name__ == \"__main__\":\n    solver = Solution()\n    \n    nums_line = sys.stdin.readline().strip()\n    nums = [int(x) for x in nums_line.split()]\n    \n    target = int(sys.stdin.readline().strip())\n    \n    result = solver.twoSum(nums, target)\n    \n    print(f\"[{result[0]},{result[1]}]\")\n",
-      java: "import java.io.BufferedReader;\nimport java.io.InputStreamReader;\nimport java.io.IOException;\nimport java.util.Arrays;\nimport java.util.HashMap;\nimport java.util.Map;\n\nclass Solution {\n    public int[] twoSum(int[] nums, int target) {\n        // Your code here\n        return new int[0];\n    }\n\n    public static void main(String[] args) throws IOException {\n        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));\n        \n        String numsLine = reader.readLine();\n        String[] numsStr = numsLine.trim().split(\"\\\\s+\");\n        int[] nums = new int[numsStr.length];\n        for (int i = 0; i < numsStr.length; i++) {\n            nums[i] = Integer.parseInt(numsStr[i]);\n        }\n        \n        int target = Integer.parseInt(reader.readLine().trim());\n        \n        Solution solution = new Solution();\n        int[] result = solution.twoSum(nums, target);\n        \n        System.out.println(\"[\" + result[0] + \",\" + result[1] + \"]\");\n    }\n}"
+      python: ``,
+      cpp: ``,
+      java: ``,
+      c: ``,
     },
-    sampleTestCases: [
-      {
-        stdin: "2 7 11 15\n9",
-        expected_output: "[0,1]\n"
-      },
-      {
-        stdin: "3 2 4\n6",
-        expected_output: "[1,2]\n"
-      },
-      {
-        stdin: "3 3\n6",
-        expected_output: "[0,1]\n"
-      }
-    ],
-    hiddenTestCases: [
-       {
-        stdin: "-1 -2 -3 -4 -5\n-8",
-        expected_output: "[2,4]\n"
-       },
-       {
-        stdin: "0 4 3 0\n0",
-        expected_output: "[0,3]\n"
-       },
-       {
-        stdin: "100 200 350 400\n750",
-        expected_output: "[2,3]\n"
-       }
-    ],
-    avgTimeComplexity: "O(N)",
-    avgSpaceComplexity: "O(N)",
+   sampleTestCases: [
+{
+"stdin": "1\n",
+"expected_output": "1\n"
+},
+{
+"stdin": "2\n",
+"expected_output": "2\n"
+}
+],
+hiddenTestCases: [
+{
+"stdin": "3\n",
+"expected_output": "3\n"
+},
+{
+"stdin": "4\n",
+"expected_output": "5\n"
+},
+{
+"stdin": "5\n",
+"expected_output": "8\n"
+},
+{
+"stdin": "6\n",
+"expected_output": "13\n"
+},
+{
+"stdin": "7\n",
+"expected_output": "21\n"
+},
+{
+"stdin": "8\n",
+"expected_output": "34\n"
+},
+{
+"stdin": "9\n",
+"expected_output": "55\n"
+},
+{
+"stdin": "10\n",
+"expected_output": "89\n"
+},
+{
+"stdin": "20\n",
+"expected_output": "10946\n"
+},
+{
+"stdin": "25\n",
+"expected_output": "121393\n"
+},
+{
+"stdin": "30\n",
+"expected_output": "1346269\n"
+},
+{
+"stdin": "35\n",
+"expected_output": "14930352\n"
+},
+{
+"stdin": "40\n",
+"expected_output": "165580141\n"
+}
+],
+    avgTimeComplexity: "O(n)",
+    avgSpaceComplexity: "O(1)",
     roundId: round.roundNumber,
   };
 
@@ -92,111 +128,15 @@ async function main() {
     where: { title: problemTitle },
     update: {
       ...problemData,
-      categories: {
-        set: categoryIds, // A simpler way to manage connections on update
-      },
+      categories: { set: categoryIds },
     },
     create: {
       ...problemData,
-      categories: {
-        connect: categoryIds,
-      },
+      categories: { connect: categoryIds },
     },
   });
-  console.log(`Successfully seeded problem: "${problemTitle}"`);
 
-  // Seed additional problems for Round 0 testing
-  const additionalProblems = [
-    {
-      title: "Reverse String",
-      description: "Write a function that reverses a string. The input string is given as an array of characters `s`.\n\nYou must do this by modifying the input array in-place with O(1) extra memory.",
-      difficulty: 'R0',
-      constraints: [
-        "1 <= s.length <= 10^5",
-        "s[i] is a printable ascii character."
-      ],
-      hints: [
-        "Use two pointers approach",
-        "Swap characters from both ends moving towards center"
-      ],
-      boilerplate: {
-        python: "import sys\n\nclass Solution:\n    def reverseString(self, s: list[str]) -> None:\n        # Your code here - modify s in-place\n        pass\n\nif __name__ == \"__main__\":\n    solver = Solution()\n    \n    s_line = sys.stdin.readline().strip()\n    s = list(s_line)\n    \n    solver.reverseString(s)\n    \n    print(''.join(s))"
-      },
-      sampleTestCases: [
-        {
-          stdin: "hello",
-          expected_output: "olleh"
-        },
-        {
-          stdin: "Hannah",
-          expected_output: "hannaH"
-        }
-      ],
-      hiddenTestCases: [
-        {
-          stdin: "racecar",
-          expected_output: "racecar"
-        }
-      ]
-    },
-    {
-      title: "Palindrome Number", 
-      description: "Given an integer `x`, return `true` if `x` is a palindrome, and `false` otherwise.",
-      difficulty: 'R0',
-      constraints: [
-        "-2^31 <= x <= 2^31 - 1"
-      ],
-      hints: [
-        "Negative numbers are not palindromes",
-        "Could you solve it without converting the integer to a string?"
-      ],
-      boilerplate: {
-        python: "import sys\n\nclass Solution:\n    def isPalindrome(self, x: int) -> bool:\n        # Your code here\n        pass\n\nif __name__ == \"__main__\":\n    solver = Solution()\n    \n    x = int(sys.stdin.readline().strip())\n    \n    result = solver.isPalindrome(x)\n    \n    print('true' if result else 'false')"
-      },
-      sampleTestCases: [
-        {
-          stdin: "121",
-          expected_output: "true"
-        },
-        {
-          stdin: "-121",
-          expected_output: "false"
-        },
-        {
-          stdin: "10",
-          expected_output: "false"
-        }
-      ],
-      hiddenTestCases: [
-        {
-          stdin: "12321",
-          expected_output: "true"
-        }
-      ]
-    }
-  ];
-
-  // Seed additional problems
-  for (const problemData of additionalProblems) {
-    await prisma.problem.upsert({
-      where: { title: problemData.title },
-      update: {
-        ...problemData,
-        roundId: round.roundNumber,
-        categories: {
-          set: categoryIds,
-        },
-      },
-      create: {
-        ...problemData,
-        roundId: round.roundNumber,
-        categories: {
-          connect: categoryIds,
-        },
-      },
-    });
-    console.log(`Successfully seeded problem: "${problemData.title}"`);
-  }
+  console.log(`Successfully seeded problem: \"" + problemTitle + "\"`);
 }
 
 main()
@@ -206,5 +146,5 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
-    console.log('Seeding finished.');
+    console.log("Seeding finished.");
   });

@@ -1,0 +1,6 @@
+id,name,regNo,username,role
+john.doe@example.com,John Doe,REG001,johndoe,PLAYER
+jane.smith@example.com,Jane Smith,REG002,janesmith,PLAYER
+admin@example.com,Admin User,ADMIN001,admin,ADMIN
+bob.wilson@example.com,Bob Wilson,REG003,,PLAYER
+alice.johnson@example.com,Alice Johnson,REG004,alice,PLAYER
