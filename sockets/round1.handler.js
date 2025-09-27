@@ -27,8 +27,6 @@ const getRedisKeys = () => ({
     startTime: `round${ROUND_NUMBER}:status:startTime`,
 });
 
-// --- NEW HELPER FUNCTION ---
-// Gets all participants from Redis and enriches them with live rank/score data from Prisma.
 const getEnrichedParticipantsList = async () => {
     const keys = getRedisKeys();
     const allParticipantsData = await redis.hgetall(keys.participants);
@@ -38,7 +36,6 @@ const getEnrichedParticipantsList = async () => {
     }
 
     const participantIds = Object.keys(allParticipantsData);
-    // Fetch users from DB to get the latest score and username for ranking
     const usersFromDb = await prisma.user.findMany({
         where: { id: { in: participantIds } },
         select: { id: true, eventScore: true, username: true },
@@ -49,14 +46,13 @@ const getEnrichedParticipantsList = async () => {
     const rankMap = new Map(usersFromDb.map((u, i) => [u.id, i + 1]));
     const usernameMap = new Map(usersFromDb.map(u => [u.id, u.username]));
 
-    // Enrich the Redis data with fresh DB data
     const participantsList = Object.values(allParticipantsData).map(pStr => {
         const p = JSON.parse(pStr);
         p.eventScore = scoreMap.get(p.id) ?? p.eventScore ?? 0;
         p.rank = rankMap.get(p.id) ?? 999;
         p.username = usernameMap.get(p.id) ?? p.username;
         return p;
-    }).sort((a, b) => a.rank - b.rank); // Sort by the new rank
+    }).sort((a, b) => a.rank - b.rank);
 
     return participantsList;
 };
@@ -64,14 +60,13 @@ const getEnrichedParticipantsList = async () => {
 
 const broadcastLobbyUpdate = async (io) => {
     try {
-        // Use the new helper function to get consistent, enriched data
         const participantsList = await getEnrichedParticipantsList();
         const keys = getRedisKeys();
         const currentStatus = await redis.get(keys.status);
 
-        io.emit('lobby:round1', { 
-            participants: participantsList.filter(p => p.status === 'lobby'), 
-            isActive: currentStatus === "running" 
+        io.emit('lobby:round1', {
+            participants: participantsList.filter(p => p.status === 'lobby'),
+            isActive: currentStatus === "running"
         });
         io.emit('round1:participantsUpdate', { participants: participantsList });
     } catch (error) {
@@ -203,13 +198,17 @@ export const round1Handler = (io, socket) => {
         
         if (!question) {
             console.error(`No unattempted question for ${difficulty} available. Cannot create match.`);
+            // ✅ FIX: Put players back in the 'waiting' queue if a match can't be made.
+            const keys = getRedisKeys();
+            await redis.hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'waiting' }));
+            await redis.hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'waiting' }));
             return;
         }
 
 
         let timerDuration;
         if (difficulty === 'R1_HARD') timerDuration = 25 * 60 * 1000;
-        else if (difficulty === 'R1_MEDIUM') timerDuration = 1 * 60 * 1000;
+        else if (difficulty === 'R1_MEDIUM') timerDuration = 20 * 60 * 1000;
         else timerDuration = 15 * 60 * 1000;
 
 
@@ -289,6 +288,9 @@ export const round1Handler = (io, socket) => {
                 for (let i = 0; i < Math.floor(group.length / 2); i++) {
                     const player1 = group[i * 2];
                     const player2 = group[i * 2 + 1];
+                    // ✅ FIX: Mark players as 'in-match' BEFORE creating the match to prevent them from being picked again
+                    player1.status = 'in-match';
+                    player2.status = 'in-match';
                     matchPromises.push(createMatch(player1, player2, difficulties[index]));
                     matchedPlayerIds.add(player1.id);
                     matchedPlayerIds.add(player2.id);
@@ -373,13 +375,13 @@ export const round1Handler = (io, socket) => {
             
             const userRank = (await prisma.user.count({ where: { eventScore: { gt: userData.eventScore || 0 } }})) + 1;
             
-            const newParticipant = { 
-                id: userId, 
-                socketId: socket.id, 
-                username: userData.username, 
+            const newParticipant = {
+                id: userId,
+                socketId: socket.id,
+                username: userData.username,
                 rank: userRank,
                 eventScore: userData.eventScore,
-                status: 'lobby' 
+                status: 'lobby'
             };
             await redis.hset(keys.participants, userId, JSON.stringify(newParticipant));
 
@@ -447,16 +449,15 @@ export const round1Handler = (io, socket) => {
         clearInterval(lobbyUpdateInterval);
         const { userId, error } = validateUser();
         if (error) return;
-        
+
         const participantStr = await redis.hget(getRedisKeys().participants, userId);
         if (!participantStr) return;
         
         const participant = JSON.parse(participantStr);
-        console.log(`[Disconnect] User ${userId} with status ${participant.status} disconnected. The match continues without pause.`);
+        console.log(`[Disconnect] User ${userId} disconnected with status: ${participant.status}. State is preserved in Redis.`);
     });
 
 
-    // --- REFACTORED getState HANDLER ---
     socket.on('round1:getState', async (payload, callback) => {
         const { userId, error } = validateUser();
         if (error) return callback?.({ success: false, error });
@@ -465,44 +466,60 @@ export const round1Handler = (io, socket) => {
 
         try {
             const keys = getRedisKeys();
-            // Get the full, fresh list of all participants
             const allParticipants = await getEnrichedParticipantsList();
             let participant = allParticipants.find(p => p.id === userId) || null;
 
             if (!participant) {
-                // If the user isn't a participant yet, return the list so the lobby can still be displayed
-                return callback?.({ success: true, participant: null, allParticipants });
+                return callback?.({
+                    success: true,
+                    participant: null,
+                    allParticipants,
+                    isActive: await redis.get(keys.status) === "running"
+                });
             }
-
-            // Handle logic for existing participants
+            
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
                 participant.status = 'waiting';
                 delete participant.cooldownEndTime;
-                await redis.hset(keys.participants, userId, JSON.stringify(participant));
-                await broadcastLobbyUpdate(io);
+                
+                const redisParticipantStr = await redis.hget(keys.participants, userId);
+                if (redisParticipantStr) {
+                    const redisParticipant = JSON.parse(redisParticipantStr);
+                    redisParticipant.status = 'waiting';
+                    delete redisParticipant.cooldownEndTime;
+                    await redis.hset(keys.participants, userId, JSON.stringify(redisParticipant));
+
+                    socket.emit('round1:cooldownEnd');
+                    await broadcastLobbyUpdate(io);
+                }
             }
             
             if (participant.socketId !== socket.id) {
-                // Update the participant object in Redis with the new socket ID for this connection
-                const redisParticipant = JSON.parse(await redis.hget(keys.participants, userId));
-                redisParticipant.socketId = socket.id;
-                await redis.hset(keys.participants, userId, JSON.stringify(redisParticipant));
-                participant.socketId = socket.id; // Update for the response object
+                const redisParticipantStr = await redis.hget(keys.participants, userId);
+                if (redisParticipantStr) {
+                    const redisParticipant = JSON.parse(redisParticipantStr);
+                    redisParticipant.socketId = socket.id;
+                    await redis.hset(keys.participants, userId, JSON.stringify(redisParticipant));
+                    participant.socketId = socket.id;
+                }
             }
             
+            // ✅ FIX: This variable will hold match data if found.
             let matchDataForClient = null;
             if (participant.status === 'in-match') {
                 const matches = await redis.hgetall(keys.matches);
                 for (const matchId in matches) {
-                    let match = JSON.parse(matches[matchId]);
+                    const match = JSON.parse(matches[matchId]);
                     if (match.players.includes(userId)) {
+                        console.log(`[GetState] Re-joining user ${userId} to match ${matchId}`);
                         socket.join(`match:${matchId}`);
                         
                         const question = await prisma.problem.findUnique({ where: { id: match.problemId }});
                         const opponentId = match.players.find(pId => pId !== userId);
                         const opponent = opponentId ? allParticipants.find(p => p.id === opponentId) : null;
-
+                        
+                        // ✅ FIX: Assign the found match data to the variable.
                         matchDataForClient = {
                             question,
                             opponent: opponent ? { id: opponent.id, rank: opponent.rank } : { id: opponentId, rank: 'N/A' },
@@ -526,14 +543,15 @@ export const round1Handler = (io, socket) => {
                 nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
             }
             
-            callback?.({ 
-                success: true, 
+            // ✅ FIX: Include matchDataForClient in the final callback payload.
+            callback?.({
+                success: true,
                 participant,
                 isActive: currentStatus === "running",
-                globalTimeRemaining, 
-                allParticipants, 
+                globalTimeRemaining,
+                allParticipants,
                 nextMatchmakingCycle,
-                matchData: matchDataForClient,
+                matchData: matchDataForClient, // This was the missing piece.
             });
         } catch (err) {
             console.error('[GetState Error]', err);
