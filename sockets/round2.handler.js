@@ -2,7 +2,7 @@ import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
 
 // --- Constants ---
-const ROUND_DURATION_MS = 1 * 60 * 1000;
+const ROUND_DURATION_MS = 20 * 60 * 1000;
 const MATCH_DURATION_MS = 20 * 60 * 1000;
 const COOLDOWN_DURATION_S = 30;
 const CHALLENGE_REQUEST_EXPIRY_S = 60;
