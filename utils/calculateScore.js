@@ -104,10 +104,10 @@ export const ScoreBounty = (difficulty, submits, isSolved )=>{
         score =  -40;
     }
 
-    if (!isSolved){
-        return 0;
+    if (isSolved){
+        return score*=0.5;
     }
-    
+
     return score;
 };
 
