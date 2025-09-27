@@ -98,19 +98,26 @@ export const ScoreRound3 = ()=>{
         return 750;
 };
 
-export const Bounty = (difficulty, submits)=>{
+export const Bounty = (difficulty, submits, isSolved )=>{
+    var score = 0;
     switch (difficulty){
         case "EASY":
-            return 200;
+            score =  200;
         case "MEDIUM":
-            return 300;
+            sccore =  300;
         case "HARD":
-            return 400;
+            score =  400;
 
     }
     if (submits < 3){
-        return -40;
+        score =  -40;
     }
+
+    if (isSolved){
+        score *= 0.5;
+
+    }
+    return score;
 };
 
 export const Hack = (gothacked) => {
