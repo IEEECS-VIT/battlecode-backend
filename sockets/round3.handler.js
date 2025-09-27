@@ -61,7 +61,8 @@ export const round3Handler = (io, socket) => {
   // ## UTILITY FUNCTIONS
 
   const validateUser = () => {
-    const userId = socket.user?.email;
+    // Assumes your auth middleware adds a `user` object with an `email` or `id` to the socket
+    const userId = socket.user?.email 
     if (!userId) {
       return { error: 'Unauthorized - No user ID' };
     }
@@ -175,15 +176,24 @@ export const round3Handler = (io, socket) => {
     }
   };
 
+  // **** FIXED FUNCTION ****
   const handleAdminReady = async (payload, callback) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
 
     try {
-      const admin = await prisma.user.findUnique({ where: { id: userId } });
-      if (admin?.role !== 'ADMIN') {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        return callback?.({ success: false, error: 'User not found.' });
+      }
+      
+      // Bypassing admin check for testing as per the frontend's "Testing Mode"
+      
+      if (user?.role !== 'ADMIN') {
         return callback?.({ success: false, error: 'Unauthorized: Not an admin.' });
       }
+    
+      
       if (globalRoundState.isActive) {
         return callback?.({ success: false, error: 'Round is already active.' });
       }
@@ -224,7 +234,7 @@ export const round3Handler = (io, socket) => {
         duration: ROUND_DURATION,
       });
 
-      console.log(`[ROUND 3] Round started by admin ${admin.username}.`);
+      console.log(`[ROUND 3] Round started by user ${user.username}.`);
       callback?.({ success: true, message: 'Round 3 has started.' });
 
     } catch (err) {
