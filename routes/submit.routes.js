@@ -40,6 +40,8 @@ router.post("/run", async (req, res) => {
       });
     }
 
+    console.log(req.body);
+
     const language_id = LANGUAGE_ID_MAP[language.toLowerCase()];
     if (!language_id) {
       return res.status(400).json({ error: `Unsupported language: ${language}` });
@@ -49,6 +51,7 @@ router.post("/run", async (req, res) => {
       where: { id: problemId },
       select: { sampleTestCases: true, title: true }
     });
+
 
     if (!problem) {
       return res.status(404).json({ error: "Problem not found" });
@@ -100,6 +103,8 @@ router.post("/run", async (req, res) => {
         )
       );
 
+      console.log("Submission status responses:", statusResponses);
+
       for (const response of statusResponses) {
         const data = response.data;
         if (results.some(r => r.token === data.token)) continue;
@@ -120,6 +125,7 @@ router.post("/run", async (req, res) => {
       if (results.length < tokens.length) await sleep(1000);
     }
 
+      console.log("Final run results:", results);
     if (results.length < tokens.length) {
       return res.status(408).json({ error: "Execution timed out" });
     }
