@@ -3,7 +3,13 @@ import axios from "axios";
 import http from "http";
 import prisma from "../config/prisma.js";
 import redis from "../config/redis.js";
-import { ScoreRound0, ScoreRound1 } from "../utils/calculateScore.js";
+// All score functions are now imported
+import {
+  ScoreRound0,
+  ScoreRound1,
+  ScoreRound2,
+  ScoreBounty,
+} from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
 import { getRound2Handlers } from "../sockets/round2.handler.js";
@@ -181,9 +187,10 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     }
 
     console.log("🔎 [SUBMIT] Checking user:", userId);
-    const userExists = await prisma.user.findUnique({ where: { id: userId } });
+    // Fetched the full user object to access round2Role later
+    const user = await prisma.user.findUnique({ where: { id: userId } });
 
-    if (!userExists) {
+    if (!user) {
       console.warn("⚠️ [SUBMIT] User not found in DB:", userId);
       return res.status(404).json({
         error: "Authenticated user not found. Please log out and log in again.",
@@ -248,7 +255,6 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     console.log("📤 [SUBMIT] Sending all test cases to Judge0:", allTestCases);
 
-    // --- Judge0 Execution Logic ---
     const httpAgent = new http.Agent();
     const axiosConfig = {
       httpAgent,
@@ -334,7 +340,6 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     console.log("📌 [SUBMIT] Final submission status:", submissionStatus);
 
-    // --- Scoring + Upsert Logic ---
     const existingSubmission = await prisma.submission.findFirst({
       where: { userId, problemId },
     });
@@ -396,27 +401,68 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         console.warn(`[Round 1] No active match found for user ${userId}`);
       }
     } else if (roundNumber === 2) {
-      console.log("📌 [SUBMIT] Handling Round2");
-      const { matchEndHandler, bountyEndHandler } = getRound2Handlers();
+      // --- NEW: ROUND 2 SCORING LOGIC ---
+      console.log("📌 [SUBMIT] Handling Round2 with context:", context);
       const isCorrect = submissionStatus === "ACCEPTED";
+      const { matchEndHandler, bountyEndHandler } = getRound2Handlers();
 
-      if (context?.type === "match" && matchEndHandler) {
-        console.log("📌 [SUBMIT] Round2 match context found");
-        if (isCorrect) {
+      if (context?.type === "match") { // Assuming 'match' is the challenge type
+        console.log("📌 [SUBMIT] Round2 challenge context found");
+
+        const isElite = user.round2Role === "ELITE";
+        
+        // NOTE: time_left isn't readily available here like in Round 1.
+        // Passing 0 for timeLeft, as score might be calculated within the handler with more context.
+        const timeLeftInSeconds = 0;
+
+        calculatedScore = ScoreRound2(
+          timeLeftInSeconds,
+          totalCount,
+          passedCount,
+          problem.difficulty,
+          isCorrect,
+          isElite,
+          executionCount // Passing executionCount as 'submits'
+        );
+        console.log(`📊 [SUBMIT] Round2 Challenge Score: ${calculatedScore} (isElite: ${isElite})`);
+
+        if (isCorrect && matchEndHandler) {
           await matchEndHandler(context.contextId, userId, "submission");
         }
-      } else if (context?.type === "bounty" && bountyEndHandler) {
+      } else if (context?.type === "bounty") {
         console.log("📌 [SUBMIT] Round2 bounty context found");
-        const submissionData = {
-          userId,
-          problemId,
-          roundId: 2,
-          code: source_code,
-          language,
-          status: submissionStatus,
-          testCasesPassed: passedCount,
-        };
-        await bountyEndHandler(userId, problemId, isCorrect, submissionData);
+        
+        // TODO: The `ScoreBounty` function expects "EASY", "MEDIUM", or "HARD".
+        // The problem difficulty from the schema is 'R2_BOUNTY'. A mapping or a
+        // new field on the Problem model is needed. Using "MEDIUM" as a placeholder.
+        const bountyDifficulty = "MEDIUM";
+
+        const previouslySolvedSubmission = await prisma.submission.findFirst({
+          where: {
+            problemId: problemId,
+            status: "ACCEPTED",
+          },
+        });
+
+        isSolved = previouslySolvedSubmission;
+
+        calculatedScore = ScoreBounty(bountyDifficulty, executionCount, isSolved);
+        console.log(`📊 [SUBMIT] Round2 Bounty Score: ${calculatedScore}`);
+
+        if (bountyEndHandler) {
+          const submissionData = {
+            userId,
+            problemId,
+            roundId: 2,
+            code: source_code,
+            language,
+            status: submissionStatus,
+            testCasesPassed: passedCount,
+          };
+          await bountyEndHandler(userId, problemId, isCorrect, submissionData);
+        }
+      } else {
+        console.warn(`[Round 2] Unknown or missing context type: ${context?.type}`);
       }
     }
 

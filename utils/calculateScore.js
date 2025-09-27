@@ -52,7 +52,7 @@ export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win,
 
     return current_score;
 };
-export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win, iselite)=>{
+export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win, iselite, submits)=>{
     //test case - 30%
     // win - 40%
     //submit - 10%
@@ -61,26 +61,16 @@ export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win
     var max_score = 0;
     var passed_ratio = passedcases/totalcases;
     var current_score = 0;
+
+    total_time = 20*60; //20 mins
+    max_score = 400;
     
-    switch (difficulty){
-        case "R2_EASY":
-            total_time = 15*60; //15 mins
-            max_score = 300;
-            break;
-        case "R2_MEDIUM":
-            total_time = 20*60; //20 mins
-            max_score = 400;
-            break;
-        case "R2_HARD":
-            total_time = 25*60; //25 mins
-            max_score = 500;
-            break;
-    }
+
     current_score += (max_score * 0.3 * passed_ratio);
     if (win){
         current_score += (max_score * 0.4);
     }
-    if (submit <= 3){
+    if (submits <= 3){
         current_score += (max_score * 0.1);
     }
     var time_formula = max_score * 0.2 * Math.exp(-0.00256 * (total_time - time_left));
@@ -94,17 +84,18 @@ export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win
 
     return current_score;
 };
+
 export const ScoreRound3 = ()=>{
         return 750;
 };
 
-export const Bounty = (difficulty, submits, isSolved )=>{
+export const ScoreBounty = (difficulty, submits, isSolved )=>{
     var score = 0;
     switch (difficulty){
         case "EASY":
             score =  200;
         case "MEDIUM":
-            sccore =  300;
+            score =  300;
         case "HARD":
             score =  400;
 
@@ -113,10 +104,10 @@ export const Bounty = (difficulty, submits, isSolved )=>{
         score =  -40;
     }
 
-    if (isSolved){
-        score *= 0.5;
-
+    if (!isSolved){
+        return 0;
     }
+    
     return score;
 };
 
