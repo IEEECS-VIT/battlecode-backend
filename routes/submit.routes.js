@@ -444,7 +444,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           },
         });
 
-        isSolved = previouslySolvedSubmission;
+        const isSolved = !!previouslySolvedSubmission;
 
         calculatedScore = ScoreBounty(bountyDifficulty, executionCount, isSolved);
         console.log(`📊 [SUBMIT] Round2 Bounty Score: ${calculatedScore}`);

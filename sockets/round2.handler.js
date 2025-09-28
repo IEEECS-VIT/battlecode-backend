@@ -238,8 +238,8 @@ export const round2Handler = (io, socket) => {
       if (!session || !session.status || session.status === 'completed' || session.status === 'timeout') return;
 
       if (isCorrect) {
-        const isFirstSolver = await redis.sadd(keys.solvedBounties(), questionId) === 1;
-        submissionData.isFirstSolverBonus = isFirstSolver;
+        // const isFirstSolver = await redis.sadd(keys.solvedBounties(), questionId) === 1;
+        // submissionData.isFirstSolverBonus = isFirstSolver;
         await prisma.submission.create({ data: submissionData });
       }
 

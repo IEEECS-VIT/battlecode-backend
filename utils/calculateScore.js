@@ -100,7 +100,7 @@ export const ScoreBounty = (difficulty, submits, isSolved )=>{
             score =  400;
 
     }
-    if (submits < 3){
+    if (submits > 3){
         score =  -40;
     }
 
