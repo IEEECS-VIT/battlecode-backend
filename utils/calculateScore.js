@@ -14,7 +14,7 @@ export const ScoreRound0 = (totalcases, passedcases, submits) => {
     }
     return score;
 
-};
+}; //450 max
 
 export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win, submits)=>{
     //test case - 30%
@@ -51,7 +51,10 @@ export const ScoreRound1 = (time_left, totalcases, passedcases, difficulty, win,
     current_score += time_formula;
 
     return current_score;
-};
+}; 
+
+//1200 maxx
+
 export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win, iselite, submits)=>{
     //test case - 30%
     // win - 40%
@@ -83,10 +86,22 @@ export const ScoreRound2  = (time_left, totalcases, passedcases, difficulty, win
     }
 
     return current_score;
-};
+}; 
 
-export const ScoreRound3 = ()=>{
-        return 750;
+
+
+export const ScoreRound3 = (totalcases, passedcases, submits) => {
+    var score = 0;
+    var passed_ratio = passedcases/totalcases;
+    if (passed_ratio == 1){
+        score += 600;
+    }
+    else{
+        score += 400*passed_ratio;
+    }
+
+    return score;
+
 };
 
 export const ScoreBounty = (difficulty, submits, isSolved )=>{

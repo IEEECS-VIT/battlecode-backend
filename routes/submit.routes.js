@@ -9,6 +9,7 @@ import {
   ScoreRound1,
   ScoreRound2,
   ScoreBounty,
+  ScoreRound3,
 } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
@@ -351,7 +352,9 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     if (roundNumber === 0) {
       calculatedScore = ScoreRound0(totalCount, passedCount, executionCount);
       console.log("📊 [SUBMIT] Round0 Score:", calculatedScore);
-    } else if (roundNumber === 1) {
+    } else if (roundNumber === 3){
+      calculatedScore=ScoreRound3(totalCount,passedCount,executionCount);
+    }else if (roundNumber === 1) {
       const keys = getRound1RedisKeys();
       const allMatchesStr = await redis.hgetall(keys.matches);
       console.log("📥 [SUBMIT] Redis matches:", allMatchesStr);
