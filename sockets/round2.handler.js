@@ -549,8 +549,14 @@ export const round2Handler = (io, socket) => {
         cleanupMulti.del(keys.pendingRequests(eliteId));
         await cleanupMulti.exec();
 
-        const question = await prisma.problem.findFirst({ where: { difficulty: 'R2_CHALLENGE' }});
-        if (!question) throw new Error("No R2_CHALLENGE question found in database.");
+        // const question = await prisma.problem.find({ where: { difficulty: 'R2_CHALLENGE' }});
+
+        const questions = await prisma.problem.findMany({
+  where: { difficulty: 'R2_CHALLENGE' }
+});
+
+const randomQuestion = questions[Math.floor(Math.random() * questions.length)];
+        if (!randomQuestion) throw new Error("No R2_CHALLENGE question found in database.");
 
         const matchId = `match:${challengerId}:${eliteId}:${Date.now()}`;
         const endTime = Date.now() + MATCH_DURATION_MS;
