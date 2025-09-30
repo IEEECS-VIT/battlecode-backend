@@ -555,8 +555,8 @@ export const round2Handler = (io, socket) => {
   where: { difficulty: 'R2_CHALLENGE' }
 });
 
-const randomQuestion = questions[Math.floor(Math.random() * questions.length)];
-        if (!randomQuestion) throw new Error("No R2_CHALLENGE question found in database.");
+const question = questions[Math.floor(Math.random() * questions.length)];
+        if (!question) throw new Error("No R2_CHALLENGE question found in database.");
 
         const matchId = `match:${challengerId}:${eliteId}:${Date.now()}`;
         const endTime = Date.now() + MATCH_DURATION_MS;
