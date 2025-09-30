@@ -281,37 +281,20 @@ export const round1Handler = (io, socket) => {
 
             const groups = [g1, g2, g3];
             const difficulties = ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'];
-            const matchPromises = [];
+       
 
-            const matchedPlayerIds = new Set();
-            groups.forEach((group, index) => {
-                for (let i = 0; i < Math.floor(group.length / 2); i++) {
-                    const player1 = group[i * 2];
-                    const player2 = group[i * 2 + 1];
-                    // ✅ FIX: Mark players as 'in-match' BEFORE creating the match to prevent them from being picked again
-                    player1.status = 'in-match';
-                    player2.status = 'in-match';
-                    matchPromises.push(createMatch(player1, player2, difficulties[index]));
-                    matchedPlayerIds.add(player1.id);
-                    matchedPlayerIds.add(player2.id);
-                }
-            });
+     const matchPromises = [];
+groups.forEach((group, index) => {
+    for (let i = 0; i < Math.floor(group.length / 2); i++) {
+        const player1 = group[i * 2];
+        const player2 = group[i * 2 + 1];
+        
+        matchPromises.push(createMatch(player1, player2, difficulties[index]));
+    }
+});
 
-            if (matchedPlayerIds.size > 0) {
-                const multi = redis.multi();
-                const allRedisParticipants = await redis.hgetall(keys.participants);
-                for (const playerId of matchedPlayerIds) {
-                    if (allRedisParticipants[playerId]) {
-                        const participant = JSON.parse(allRedisParticipants[playerId]);
-                        participant.status = 'in-match';
-                        multi.hset(keys.participants, playerId, JSON.stringify(participant));
-                    }
-                }
-                await multi.exec();
-            }
-
-            await Promise.all(matchPromises);
-            await broadcastLobbyUpdate(io);
+await Promise.all(matchPromises);
+await broadcastLobbyUpdate(io);
 
         } catch (error) {
             console.error("[Matchmaking Error]", error);
