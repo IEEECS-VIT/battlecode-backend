@@ -637,7 +637,6 @@ export const round1AdminAddUser = async (io, userId, callback) => {
 
     const keys = getRedisKeys();
 
-    // 1. User must exist
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, username: true, eventScore: true }
@@ -647,18 +646,15 @@ export const round1AdminAddUser = async (io, userId, callback) => {
       return callback?.({ success: false, error: "User not found" });
     }
 
-    // 2. Round must not be ended
     if (await redis.get(keys.status) === "ended") {
       return callback?.({ success: false, error: "Round already ended" });
     }
 
-    // 3. If already present → no-op
     const existing = await redis.hget(keys.participants, userId);
     if (existing) {
       return callback?.({ success: true, message: "User already in Round 1" });
     }
 
-    // 4. Create participant (NO socketId)
     const participant = {
       id: userId,
       socketId: null,
@@ -674,10 +670,8 @@ export const round1AdminAddUser = async (io, userId, callback) => {
       JSON.stringify(participant)
     );
 
-    // 5. Broadcast update
     await broadcastLobbyUpdate(io);
 
-    // 6. If user is online, notify
     io.to(`user:${userId}`).emit("round1:adminAdded");
 
     callback?.({ success: true });
