@@ -1,5 +1,5 @@
 import prisma from "../config/prisma.js";
-import { round1RecoveryHandler } from "./round1Handler.js";
+import { round1RecoveryHandler } from "./round1.handler.js";
 
 export const globalHandler = (io, socket) => {
   console.log(` Global handler initialized for user: ${socket.user.email}`);

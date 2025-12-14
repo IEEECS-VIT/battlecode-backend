@@ -67,13 +67,13 @@ model Submission {
   roundId         Int
   code            String
   language        String
-  score           Float?
   status          SubmissionStatus
   runtime         Int?
   memory          Int?
   testCasesPassed Int?
   executionCount  Int              @default(1)
   createdAt       DateTime         @default(now())
+  score           Float?
   problem         Problem          @relation(fields: [problemId], references: [id])
   round           Round            @relation(fields: [roundId], references: [roundNumber])
   user            User             @relation(fields: [userId], references: [id])

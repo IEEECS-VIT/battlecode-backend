@@ -4,10 +4,11 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "prisma generate"
-  },
+  "dev": "nodemon server.js",
+  "start": "node server.js",
+  "test": "echo \"Error: no test specified\" && exit 1",
+  "postinstall": "prisma generate"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -21,10 +22,12 @@
     "express": "^5.1.0",
     "ioredis": "^5.6.1",
     "leetcode-query": "^2.0.0",
-    "nodemon": "^3.1.10",
     "prisma": "^6.8.2",
     "redis": "^5.1.0",
     "socket.io": "^4.8.1",
     "supabase": "^2.24.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
   }
 }
