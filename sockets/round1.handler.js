@@ -560,5 +560,150 @@ await broadcastLobbyUpdate(io);
     });
 };
 
-
 export const getRound1MatchEndHandler = () => round1MatchEndHandler;
+
+export const round1RecoveryHandler = async (io, socket, userId) => {
+  try {
+    socket.join(`user:${userId}`);
+
+    const keys = getRedisKeys();
+    const participantStr = await redis.hget(keys.participants, userId);
+    if (!participantStr) return;
+
+    let participant = JSON.parse(participantStr);
+
+    // Fix socketId
+    if (participant.socketId !== socket.id) {
+      participant.socketId = socket.id;
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+    }
+
+    // Cooldown expiry
+    if (
+      participant.status === 'cooldown' &&
+      Date.now() > participant.cooldownEndTime
+    ) {
+      participant.status = 'waiting';
+      delete participant.cooldownEndTime;
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+
+      socket.emit('round1:cooldownEnd');
+      await broadcastLobbyUpdate(io);
+    }
+
+    // In-match recovery
+    if (participant.status === 'in-match') {
+      const matches = await redis.hgetall(keys.matches);
+
+      for (const matchId in matches) {
+        const match = JSON.parse(matches[matchId]);
+        if (!match.players.includes(userId)) continue;
+
+        socket.join(`match:${matchId}`);
+
+        const question = await prisma.problem.findUnique({
+          where: { id: match.problemId }
+        });
+
+        const opponentId = match.players.find(id => id !== userId);
+        const opponentStr = await redis.hget(keys.participants, opponentId);
+        const opponent = opponentStr ? JSON.parse(opponentStr) : null;
+
+        socket.emit('round1:matchFound', {
+          question,
+          opponent: {
+            id: opponentId,
+            rank: opponent?.rank ?? 'N/A'
+          },
+          startTime: match.startTime,
+          duration: match.duration
+        });
+
+        break;
+      }
+    }
+  } catch (err) {
+    console.error('[Round1 Recovery Error]', err);
+  }
+};
+
+//ADMIN HANDLERS FOR ROUND 1
+
+export const round1AdminAddUser = async (io, userId, callback) => {
+  try {
+    if (!userId) {
+      return callback?.({ success: false, error: "Invalid user email" });
+    }
+
+    const keys = getRedisKeys();
+
+    // 1. User must exist
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, eventScore: true }
+    });
+
+    if (!user) {
+      return callback?.({ success: false, error: "User not found" });
+    }
+
+    // 2. Round must not be ended
+    if (await redis.get(keys.status) === "ended") {
+      return callback?.({ success: false, error: "Round already ended" });
+    }
+
+    // 3. If already present → no-op
+    const existing = await redis.hget(keys.participants, userId);
+    if (existing) {
+      return callback?.({ success: true, message: "User already in Round 1" });
+    }
+
+    // 4. Create participant (NO socketId)
+    const participant = {
+      id: userId,
+      socketId: null,
+      username: user.username,
+      rank: null,            // rank will be enriched later
+      eventScore: user.eventScore,
+      status: "lobby"
+    };
+
+    await redis.hset(
+      keys.participants,
+      userId,
+      JSON.stringify(participant)
+    );
+
+    // 5. Broadcast update
+    await broadcastLobbyUpdate(io);
+
+    // 6. If user is online, notify
+    io.to(`user:${userId}`).emit("round1:adminAdded");
+
+    callback?.({ success: true });
+
+  } catch (err) {
+    console.error("[Admin Add User R1]", err);
+    callback?.({ success: false, error: "Failed to add user" });
+  }
+};
+
+export const round1AdminRemoveUser = async (io, userId, callback) => {
+  try {
+    const keys = getRedisKeys();
+
+    const existed = await redis.hdel(keys.participants, userId);
+    if (!existed) {
+      return callback?.({ success: false, error: "User not in round" });
+    }
+
+    await broadcastLobbyUpdate(io);
+
+    io.to(`user:${userId}`).emit("round1:adminRemoved");
+
+    callback?.({ success: true });
+  } catch (err) {
+    console.error("[Admin Remove User R1]", err);
+    callback?.({ success: false, error: "Failed to remove user" });
+  }
+};

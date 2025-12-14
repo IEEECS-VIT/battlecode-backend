@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { round1RecoveryHandler } from "./round1Handler.js";
 
 export const globalHandler = (io, socket) => {
   console.log(` Global handler initialized for user: ${socket.user.email}`);
@@ -56,6 +57,22 @@ export const globalHandler = (io, socket) => {
       }
     }
   };
+
+  const bootstrapSocket = async () => {
+  const currentRound = await getCurrentRound();
+
+  if (
+    currentRound.currentRoundNumber === 1 &&
+    currentRound.currentRoundStatus === 'IN_PROGRESS'
+  ) {
+    await round1RecoveryHandler(io, socket, socket.user.email);
+  }
+
+  // ONLY after recovery finishes
+  await handleUserJoin({}, null);
+};
+
+bootstrapSocket();
 
   // Handle leaderboard request
   const handleLeaderboardRequest = async (payload, callback) => {
@@ -126,9 +143,6 @@ export const globalHandler = (io, socket) => {
   socket.on("user:leaderboard", handleLeaderboardRequest);
   socket.on("user:current-round", handleCurrentRoundRequest);
   socket.on("user:broadcast", handleUserBroadcast);
-
-  console.log(` Auto-joining user: ${socket.user.email}`);
-  handleUserJoin({}, null);
 };
 
 // Helper function to get current round

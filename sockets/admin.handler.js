@@ -7,11 +7,14 @@ export const adminHandler = (io, socket) => {
   
   if (!isAdmin) {
     console.log(`Non-admin user ${socket.user.email} tried to access admin functions`);
-    return;
   }
 
   // Handle round status update
   const handleUpdateRoundStatus = async (payload, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
+
     try {
       const { roundNumber, status } = payload;
       
@@ -54,7 +57,42 @@ export const adminHandler = (io, socket) => {
     }
   };
 
-  // Legacy message handler
+    socket.on('admin:adduser', async ({ user, round }, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
+
+    const userId = user?.email;
+    const roundNumber = round;
+
+    switch (roundNumber) {
+      case 1:
+        return round1AdminAddUser(io, userId, callback);
+      case 2:
+        return round2AdminAddUser(io, userId, callback);
+      default:
+        return callback?.({ success: false, error: 'Invalid round' });
+    }
+  });
+
+  socket.on('admin:removeuser', async ({ user, round }, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
+    const userId = user?.email;
+    const roundNumber = round;
+
+    switch (roundNumber) {
+      case 1:
+        return round1AdminRemoveUser(io, userId, callback);
+      case 2:
+        return round2AdminRemoveUser(io, userId, callback);
+      default:
+        return callback?.({ success: false, error: 'Invalid round' });
+    }
+  });
+
+    // Legacy message handler
   const handleClientMessage = (payload, callback) => {
     console.log(
       `Message from admin ${socket.id} (User: ${socket.user.id}): "${payload.message}"`
@@ -73,6 +111,10 @@ export const adminHandler = (io, socket) => {
   socket.on("admin:updateRoundStatus", handleUpdateRoundStatus);
   socket.on("client:sendMessage", handleClientMessage);
 
-  console.log(`Admin ${socket.user.id} connected to admin socket`);
+  if (isAdmin) {
+    console.log(`Admin ${socket.user.id} connected to admin socket`);
+  }
+
 };
+
   
