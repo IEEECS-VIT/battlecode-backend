@@ -1,6 +1,6 @@
 import prisma from "../config/prisma.js";
 import { getCurrentRound } from "./global.handler.js";
-import { round1AdminAddUser } from "./round1.handler.js";
+import { round1AdminAddUser,round1AdminRemoveUser } from "./round1.handler.js";
 
 export const adminHandler = (io, socket) => {
   // Check if user is admin
