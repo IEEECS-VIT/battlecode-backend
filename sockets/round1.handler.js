@@ -543,7 +543,7 @@ await broadcastLobbyUpdate(io);
     });
 
 
-    socket.on('round1:reset', async (payload, callback) => {
+    socket.on('round1:reset', async (payload) => {
         const { userId, error } = validateUser();
         if (error) return callback?.({ success: false, error });
 
