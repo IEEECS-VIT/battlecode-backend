@@ -340,11 +340,16 @@ export const round2Handler = (io, socket) => {
     }
   };
 
-  const handleGetState = async (callback) => {
+  const handleGetState = async () => {
      try {
       const userId = socket.user?.email;
-      if (!userId) return callback?.({ success: false, message: "Authentication error." });
-
+      if (!userId) {
+      socket.emit("round2:state:error", {
+        success: false,
+        message: "Authentication error.",
+      });
+      return;
+    }
       const [roundStarted, endTimeStr, participantStr, userMatchId, activeBountyKey] = await Promise.all([
         redis.get(keys.roundStarted),
         redis.get(keys.roundEndTime),
@@ -374,7 +379,7 @@ export const round2Handler = (io, socket) => {
       callback?.({ success: true, state });
     } catch (err) {
       console.error("Error in handleGetState:", err);
-      callback?.({ success: false, message: "Server error." });
+  
     }
   };
 

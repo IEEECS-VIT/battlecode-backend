@@ -441,9 +441,9 @@ await broadcastLobbyUpdate(io);
     });
 
 
-    socket.on('round1:getState', async (payload, callback) => {
+    socket.on('round1:getState', async (payload) => {
         const { userId, error } = validateUser();
-        if (error) return callback?.({ success: false, error });
+        if (error) return;
 
         socket.join(`user:${userId}`);
 
@@ -453,13 +453,18 @@ await broadcastLobbyUpdate(io);
             let participant = allParticipants.find(p => p.id === userId) || null;
 
             if (!participant) {
-                return callback?.({
+                socket.emit("round1:state", {
                     success: true,
                     participant: null,
                     allParticipants,
-                    isActive: await redis.get(keys.status) === "running"
+                    isActive: await redis.get(keys.status) === "running",
+                    globalTimeRemaining: 0,
+                    nextMatchmakingCycle: null,
+                    matchData: null,
                 });
-            }
+                return;
+                }
+
             
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
                 console.log(`[GetState] Cooldown for ${userId} expired. Updating status.`);
@@ -527,7 +532,7 @@ await broadcastLobbyUpdate(io);
             }
             
             // ✅ FIX: Include matchDataForClient in the final callback payload.
-            callback?.({
+            socket.emit("round1:state",{
                 success: true,
                 participant,
                 isActive: currentStatus === "running",
@@ -538,24 +543,31 @@ await broadcastLobbyUpdate(io);
             });
         } catch (err) {
             console.error('[GetState Error]', err);
-            callback?.({ success: false, error: 'Server error fetching state.' });
+            return;
         }
     });
 
 
     socket.on('round1:reset', async (payload) => {
         const { userId, error } = validateUser();
-        if (error) return callback?.({ success: false, error });
-
+        if (error){
+            socket.emit('user not found'); 
+            return;
+        } 
 
         const userData = await prisma.user.findUnique({ where: { id: userId, role: 'ADMIN' } });
-        if (!userData) return callback?.({ success: false, error: 'Unauthorized.' });
+        if (!userData){
+            socket.emit('unauthorized'); 
+            return;
+        } 
+;
         
         if (await resetRoundState()) {
             io.emit('round1:reset');
-            callback?.({ success: true, message: 'Round 1 reset successfully.' });
+            socket.emit('round1:reset:success');
         } else {
-            callback?.({ success: false, error: 'Failed to reset round.' });
+            socket.emit('failed to reset round');
+            return;
         }
     });
 };
@@ -629,10 +641,11 @@ export const round1RecoveryHandler = async (io, socket, userId) => {
 
 //ADMIN HANDLERS FOR ROUND 1
 
-export const round1AdminAddUser = async (io, userId, callback) => {
+export const round1AdminAddUser = async (io, userId) => {
   try {
     if (!userId) {
-      return callback?.({ success: false, error: "Invalid user email" });
+      io.emit("admin:error", { error: "Invalid user email" });
+      return;
     }
 
     const keys = getRedisKeys();
@@ -643,17 +656,22 @@ export const round1AdminAddUser = async (io, userId, callback) => {
     });
 
     if (!user) {
-      return callback?.({ success: false, error: "User not found" });
+      io.emit("admin:error", { error: "User not found" });
+      return;
     }
 
     if (await redis.get(keys.status) === "ended") {
-      return callback?.({ success: false, error: "Round already ended" });
+      io.emit("admin:error", { error: "Round already ended" });
+      return;
     }
 
     const existing = await redis.hget(keys.participants, userId);
     if (existing) {
-      return callback?.({ success: true, message: "User already in Round 1" });
+      io.to(`user:${userId}`).emit("round1:adminAdded");
+      return;
     }
+
+    const roundStatus = await redis.get(keys.status);
 
     const participant = {
       id: userId,
@@ -661,7 +679,7 @@ export const round1AdminAddUser = async (io, userId, callback) => {
       username: user.username,
       rank: null,            // rank will be enriched later
       eventScore: user.eventScore,
-      status: "lobby"
+      status: roundStatus === "running" ? "waiting" : "lobby"
     };
 
     await redis.hset(
@@ -673,31 +691,172 @@ export const round1AdminAddUser = async (io, userId, callback) => {
     await broadcastLobbyUpdate(io);
 
     io.to(`user:${userId}`).emit("round1:adminAdded");
-
-    callback?.({ success: true });
+    io.emit("admin:success", { action: "add", userId });
 
   } catch (err) {
     console.error("[Admin Add User R1]", err);
-    callback?.({ success: false, error: "Failed to add user" });
+    io.emit("admin:error", { error: "Failed to add user" });
   }
 };
 
-export const round1AdminRemoveUser = async (io, userId, callback) => {
+export const handleMatchForfeit = async (io, forfeitingUserId) => {
+  const keys = getRedisKeys();
+
+  try {
+    // 1️⃣ Find active match involving the user
+    const matches = await redis.hgetall(keys.matches);
+    let matchId = null;
+    let match = null;
+
+    for (const id in matches) {
+      const parsed = JSON.parse(matches[id]);
+      if (parsed.players.includes(forfeitingUserId)) {
+        matchId = id;
+        match = parsed;
+        break;
+      }
+    }
+
+    if (!matchId || !match) {
+      console.warn(`[Forfeit] No active match found for ${forfeitingUserId}`);
+      return;
+    }
+
+    // 2️⃣ Identify opponent
+    const opponentId = match.players.find(p => p !== forfeitingUserId);
+    if (!opponentId) {
+      console.warn(`[Forfeit] Opponent missing in match ${matchId}`);
+      return;
+    }
+
+    console.log(
+      `[Forfeit] User ${forfeitingUserId} forfeits match ${matchId}. Winner: ${opponentId}`
+    );
+
+    // 3️⃣ Persist match result
+    try {
+      await prisma.match.update({
+        where: { id: matchId },
+        data: {
+          status: 'COMPLETED',
+          winnerId: opponentId,
+        },
+      });
+    } catch (err) {
+      console.warn(`[Forfeit] Prisma update failed for match ${matchId}`, err);
+    }
+
+    // 4️⃣ Cleanup Redis match state
+    await redis.hdel(keys.matches, matchId);
+
+    // 5️⃣ Move both players to cooldown
+    for (const playerId of match.players) {
+      const participantStr = await redis.hget(keys.participants, playerId);
+      if (!participantStr) continue;
+
+      const participant = JSON.parse(participantStr);
+      participant.status = 'cooldown';
+      participant.cooldownEndTime = Date.now() + COOLDOWN_DURATION;
+
+      await redis.hset(keys.participants, playerId, JSON.stringify(participant));
+
+      io.to(`user:${playerId}`).emit('round1:cooldown', {
+        cooldownEndTime: participant.cooldownEndTime,
+      });
+    }
+
+    // 6️⃣ Notify match room
+    io.to(`match:${matchId}`).emit('round1:matchEnd', {
+      type: 'forfeit',
+      winnerId: opponentId,
+      loserId: forfeitingUserId,
+    });
+
+    io.to(`user:${opponentId}`).emit('round1:matchEnd', {
+      type: 'win',
+      reason: 'ADMIN_FORFEIT',
+    });
+
+    io.to(`user:${forfeitingUserId}`).emit('round1:matchEnd', {
+      type: 'lose',
+      reason: 'ADMIN_FORFEIT',
+    });
+
+    // 7️⃣ Update lobby
+    await broadcastLobbyUpdate(io);
+  } catch (err) {
+    console.error('[handleMatchForfeit] Fatal error', err);
+  }
+};
+
+
+export const round1AdminRemoveUser = async (io, userId) => {
   try {
     const keys = getRedisKeys();
 
-    const existed = await redis.hdel(keys.participants, userId);
-    if (!existed) {
-      return callback?.({ success: false, error: "User not in round" });
+    const participantStr = await redis.hget(keys.participants, userId);
+    if (!participantStr) {
+      io.emit("admin:error", { error: "User not in round" });
+      return;
     }
+
+    const participant = JSON.parse(participantStr);
+
+    // 🔴 If user is in match → forfeit
+    if (participant.status === "in-match") {
+      await handleMatchForfeit(io, userId);
+    }
+
+    await redis.hdel(keys.participants, userId);
 
     await broadcastLobbyUpdate(io);
 
     io.to(`user:${userId}`).emit("round1:adminRemoved");
+    io.emit("admin:success", { action: "remove", userId });
 
-    callback?.({ success: true });
   } catch (err) {
     console.error("[Admin Remove User R1]", err);
-    callback?.({ success: false, error: "Failed to remove user" });
+    io.emit("admin:error", { error: "Failed to remove user" });
   }
+};
+
+export const endRound1 = async (io) => {
+  const keys = getRedisKeys();
+
+  console.log("--- ENDING ROUND 1 ---");
+
+  // stop timers
+  if (matchmakingInterval) clearInterval(matchmakingInterval);
+  if (globalTimer) clearTimeout(globalTimer);
+  if (globalTimerInterval) clearInterval(globalTimerInterval);
+  if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+
+  matchmakingInterval =
+    globalTimer =
+    globalTimerInterval =
+    matchmakingCycleInterval =
+      null;
+
+  // end all matches
+  const matches = await redis.hgetall(keys.matches);
+  for (const matchId in matches) {
+    await handleMatchEnd(matchId, null);
+  }
+
+  // reset participants
+  const participants = await redis.hgetall(keys.participants);
+  for (const id in participants) {
+    const p = JSON.parse(participants[id]);
+    p.status = "lobby";
+    delete p.cooldownEndTime;
+    await redis.hset(keys.participants, id, JSON.stringify(p));
+  }
+
+  await redis.set(keys.status, "ended");
+  await prisma.round.update({
+    where: { roundNumber: 1 },
+    data: { status: "COMPLETED" },
+  });
+
+  await broadcastLobbyUpdate(io);
 };

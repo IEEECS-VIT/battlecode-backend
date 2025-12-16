@@ -1,8 +1,22 @@
 import prisma from "../config/prisma.js";
-import { round1RecoveryHandler } from "./round1.handler.js";
+import { round1RecoveryHandler,endRound1 } from "./round1.handler.js";
 
 export const globalHandler = (io, socket) => {
   console.log(` Global handler initialized for user: ${socket.user.email}`);
+
+  socket.on("admin:endRound", async ({ roundNumber }) => {
+  if (socket.user.role !== "ADMIN") {
+    socket.emit("admin:error", { error: "Unauthorized" });
+    return;
+  }
+
+  if (roundNumber === 1) {
+    await endRound1(io);
+
+  const updatedRound = await getCurrentRound();
+  io.emit("server:currentRound", updatedRound);
+  }
+});
   
   // Handle user joining - ensure they're in the leaderboard
   const handleUserJoin = async (payload, callback) => {
@@ -239,6 +253,8 @@ const getLeaderboard = async () => {
     }
   }
 };
+
+
 
 
 const broadcastLeaderboard = async (io) => {

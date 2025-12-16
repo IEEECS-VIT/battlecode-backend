@@ -58,38 +58,42 @@ export const adminHandler = (io, socket) => {
     }
   };
 
-    socket.on('admin:adduser', async ({ user, round }, callback) => {
-    if (socket.user.role !== 'ADMIN') {
-      return callback?.({ success: false, error: 'Unauthorized' });
-    }
+    socket.on('admin:adduser', async ({ user, round }) => {
+    if (socket.user.role !== 'ADMIN') return;
 
     const userId = user?.email;
+    if (!userId) {
+      console.warn('[ADMIN] adduser called without user email');
+      return;
+      }
     const roundNumber = round;
 
     switch (roundNumber) {
       case 1:
-        return round1AdminAddUser(io, userId, callback);
-      case 2:
-        return round2AdminAddUser(io, userId, callback);
+        return round1AdminAddUser(io, userId);
       default:
-        return callback?.({ success: false, error: 'Invalid round' });
+        console.warn(`[ADMIN] Invalid round ${roundNumber} for adduser`);
+        return;
     }
   });
 
-  socket.on('admin:removeuser', async ({ user, round }, callback) => {
-    if (socket.user.role !== 'ADMIN') {
-      return callback?.({ success: false, error: 'Unauthorized' });
-    }
+  socket.on('admin:removeuser', async ({ user, round }) => {
+    if (socket.user.role !== 'ADMIN') return;
+
     const userId = user?.email;
+    if (!userId) {
+      console.warn('[ADMIN] adduser called without user email');
+      return;
+    }
     const roundNumber = round;
 
     switch (roundNumber) {
       case 1:
-        return round1AdminRemoveUser(io, userId, callback);
-      case 2:
-        return round2AdminRemoveUser(io, userId, callback);
+        return round1AdminRemoveUser(io, userId);
       default:
-        return callback?.({ success: false, error: 'Invalid round' });
+        console.warn(`[ADMIN] Invalid round ${roundNumber} for removeuser`);
+        return;
+
     }
   });
 
