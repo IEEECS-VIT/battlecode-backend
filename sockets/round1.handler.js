@@ -857,6 +857,7 @@ export const endRound1 = async (io) => {
     where: { roundNumber: 1 },
     data: { status: "COMPLETED" },
   });
+  io.emit('round1:ended');
 
   await broadcastLobbyUpdate(io);
 };
