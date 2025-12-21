@@ -7,13 +7,20 @@ import initializeSocket from "./sockets/index.js";
 
 const app = express();
 const httpServer = createServer(app);
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://battlecode-frontend-cc.vercel.app"
+  ],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  credentials: true
+}));
 
 // Socket.io setup
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
+    origin: "https://battlecode-frontend-cc.vercel.app",
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    credentials: true,
   },
 });
 
@@ -34,7 +41,7 @@ app.get("/", (req, res) => {
   res.send("BattleCode Backend");
 });
 
-const PORT = 8000;
+const PORT = process.env.PORT || 8000;
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
