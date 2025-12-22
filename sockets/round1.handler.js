@@ -260,46 +260,52 @@ export const round1Handler = (io, socket) => {
         }
     };
 
-
-    const runMatchmakingCycle = async () => {
-        const keys = getRedisKeys();
-        const allParticipants = await getEnrichedParticipantsList();
-
-        const waitingPlayers = allParticipants.filter(p => p.status === 'waiting');
-
-        if (waitingPlayers.length < 2) return;
-        console.log(`[Matchmaking] Running cycle with ${waitingPlayers.length} players waiting.`);
-
-        try {
-            const third = Math.ceil(waitingPlayers.length / 3);
-            let g1 = waitingPlayers.slice(0, third);
-            let g2 = waitingPlayers.slice(third, 2 * third);
-            let g3 = waitingPlayers.slice(2 * third);
-
-            if (g1.length % 2 !== 0 && g2.length > 0) g2.unshift(g1.pop());
-            if (g2.length % 2 !== 0 && g3.length > 0) g3.unshift(g2.pop());
-
-            const groups = [g1, g2, g3];
-            const difficulties = ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'];
-       
-
-     const matchPromises = [];
-groups.forEach((group, index) => {
-    for (let i = 0; i < Math.floor(group.length / 2); i++) {
-        const player1 = group[i * 2];
-        const player2 = group[i * 2 + 1];
-        
-        matchPromises.push(createMatch(player1, player2, difficulties[index]));
-    }
-});
-
-await Promise.all(matchPromises);
-await broadcastLobbyUpdate(io);
-
-        } catch (error) {
-            console.error("[Matchmaking Error]", error);
+    const shuffleArray = (array) => {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
         }
+        return array;
     };
+
+
+    
+
+
+const runMatchmakingCycle = async () => {
+  const keys = getRedisKeys();
+  const allParticipants = await getEnrichedParticipantsList();
+
+  let waitingPlayers = allParticipants.filter(p => p.status === 'waiting');
+
+  if (waitingPlayers.length < 2) return;
+
+  console.log(`[Matchmaking] Random cycle with ${waitingPlayers.length} players`);
+
+  // 🔀 Shuffle randomly
+  waitingPlayers = shuffleArray(waitingPlayers);
+
+  const matchPromises = [];
+
+  for (let i = 0; i < Math.floor(waitingPlayers.length / 2); i++) {
+    const player1 = waitingPlayers[i * 2];
+    const player2 = waitingPlayers[i * 2 + 1];
+
+    // Optional: random difficulty
+    const difficulties = ['R1_EASY', 'R1_MEDIUM', 'R1_HARD'];
+    const difficulty =
+      difficulties[Math.floor(Math.random() * difficulties.length)];
+
+    matchPromises.push(
+      createMatch(player1, player2, difficulty)
+    );
+  }
+  
+
+  await Promise.all(matchPromises);
+  await broadcastLobbyUpdate(io);
+};
+
 
 
     const endRound = async () => {

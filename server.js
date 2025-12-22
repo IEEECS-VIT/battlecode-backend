@@ -9,7 +9,7 @@ const app = express();
 const httpServer = createServer(app);
 app.use(cors({
   origin: [
-    "https://battlecode-frontend-cc.vercel.app"
+    "http://localhost:3000"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   credentials: true
@@ -18,7 +18,7 @@ app.use(cors({
 // Socket.io setup
 const io = new Server(httpServer, {
   cors: {
-    origin: "https://battlecode-frontend-cc.vercel.app",
+    origin: "http://localhost:3000",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
