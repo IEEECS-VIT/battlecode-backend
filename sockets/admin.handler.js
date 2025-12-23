@@ -1,6 +1,6 @@
 import prisma from "../config/prisma.js";
 import { getCurrentRound } from "./global.handler.js";
-import { round1AdminAddUser,round1AdminRemoveUser } from "./round1.handler.js";
+import { round1AdminAddUser, round1AdminRemoveUser, endRound1 } from "./round1.handler.js";
 
 export const adminHandler = (io, socket) => {
   // Check if user is admin
@@ -94,6 +94,28 @@ export const adminHandler = (io, socket) => {
         console.warn(`[ADMIN] Invalid round ${roundNumber} for removeuser`);
         return;
 
+    }
+  });
+
+  socket.on('admin:endRound', async ({ roundNumber }) => {
+    if (socket.user.role !== 'ADMIN') return;
+
+    if (!roundNumber) {
+      console.warn('[ADMIN] endRound called without roundNumber');
+      return;
+    }
+
+    switch (roundNumber) {
+      case 1:
+        return endRound1(io);
+      // TODO: Add handlers for other rounds (round 2, round 3, etc.)
+      // case 2:
+      //   return endRound2(io);
+      // case 3:
+      //   return endRound3(io);
+      default:
+        console.warn(`[ADMIN] Invalid round ${roundNumber} for endRound`);
+        return;
     }
   });
 
