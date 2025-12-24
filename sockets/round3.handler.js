@@ -44,7 +44,7 @@ const resetRoundState = async () => {
   try {
     initializeGlobalState();
     const keys = getRedisKeys();
-    await redis.del(keys.lobby, keys.state, keys.timer, keys.problems);
+    await redis.del(keys.lobby,keys.state, keys.timer, keys.problems);
     console.log(`[ROUND 3] All Redis keys for Round 3 have been cleared.`);
     return true;
   } catch (error) {
@@ -345,7 +345,7 @@ export const round3Handler = (io, socket) => {
     }
   };
   
-  const handleReset = async (callback) => {
+  const handleReset = async (payload, callback) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
     try {

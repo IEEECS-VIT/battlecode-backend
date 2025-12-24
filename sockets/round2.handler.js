@@ -669,6 +669,111 @@ const question = questions[Math.floor(Math.random() * questions.length)];
     }
   };
 
+  const resetRound2Instance = async () => {
+  try {
+    console.warn("🔄 [ADMIN] Resetting Round 2 state");
+
+    // 1️⃣ Stop in-memory intervals
+    if (lobbyUpdateInterval) clearInterval(lobbyUpdateInterval);
+    if (dashboardUpdateInterval) clearInterval(dashboardUpdateInterval);
+    lobbyUpdateInterval = null;
+    dashboardUpdateInterval = null;
+
+    // 2️⃣ Clear in-memory timeouts
+    for (const timeout of requestTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    requestTimeouts.clear();
+
+    for (const timeout of disconnectTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    disconnectTimeouts.clear();
+
+    // 3️⃣ Collect ALL round-2 Redis keys
+    const patterns = [
+      "round2:participants",
+      "round2:started",
+      "round2:endTime",
+      "round2:elites",
+      "round2:challengers",
+      "round2:role:*",
+      "round2:cooldown:*",
+      "round2:bounty:*",
+      "round2:activeBounty:*",
+      "round2:request:*",
+      "round2:pending:*",
+      "round2:outgoing:*",
+      "round2:match:*",
+      "round2:userMatch:*",
+      "round2:rejects:*",
+      "round2:solvedBounties",
+      "round2:attempted:*",
+    ];
+
+    // 4️⃣ Delete Redis keys safely
+    for (const pattern of patterns) {
+      const keys = await redis.keys(pattern);
+      if (keys.length > 0) {
+        await redis.del(keys);
+      }
+    }
+
+    // 5️⃣ Reset DB round status
+    await prisma.round.update({
+      where: { roundNumber: 2 },
+      data: { status: "LOBBY" },
+    });
+
+    console.log("✅ [ADMIN] Round 2 reset complete");
+    return true;
+  } catch (err) {
+    console.error("❌ [ADMIN] Failed to reset Round 2", err);
+    return false;
+  }
+};
+
+const handleRound2Reset = async (payload, callback) => {
+  try {
+    // 🔐 Admin check
+    const admin = await prisma.user.findUnique({
+      where: { id: socket.user?.email },
+      select: { role: true },
+    });
+
+    if (admin?.role !== "ADMIN") {
+      return callback?.({
+        success: false,
+        error: "Unauthorized",
+      });
+    }
+
+    // 🔄 Reset round 2
+    const success = await resetRound2Instance();
+
+    if (!success) {
+      return callback?.({
+        success: false,
+        error: "Reset failed",
+      });
+    }
+
+    // 📢 Notify all clients
+    io.emit("round2:reset");
+
+    return callback?.({ success: true });
+
+  } catch (err) {
+    console.error("[Round2 Reset Error]", err);
+    return callback?.({
+      success: false,
+      error: "Server error",
+    });
+  }
+};
+
+
+
   socket.on("round2:join", handleLobbyJoin);
   socket.on("round2:start", handleStart);
   socket.on("round2:getState", handleGetState);
@@ -679,6 +784,8 @@ const question = questions[Math.floor(Math.random() * questions.length)];
   socket.on("round2:challengeRequest", handleChallengeRequest);
   socket.on("round2:challengeAccept", handleChallengeAccept);
   socket.on("round2:challengeReject", handleChallengeReject);
+  socket.on("round2:reset", handleRound2Reset);
+
 };
 
 export const getRound2Handlers = () => ({

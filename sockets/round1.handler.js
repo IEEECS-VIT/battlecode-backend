@@ -17,6 +17,7 @@ let globalTimerInterval = null;
 let matchmakingInterval = null;
 let matchmakingCycleInterval = null;
 let round1MatchEndHandler = null;
+let lobbyBroadcastInterval = null;
 
 
 const getRedisKeys = () => ({
@@ -111,8 +112,9 @@ const startJanitor = (io) => {
 export const round1Handler = (io, socket) => {
     startJanitor(io);
 
-    const lobbyUpdateInterval = setInterval(() => broadcastLobbyUpdate(io), LOBBY_UPDATE_INTERVAL);
-
+    if (!lobbyBroadcastInterval) {
+      lobbyBroadcastInterval = setInterval(() => broadcastLobbyUpdate(io),LOBBY_UPDATE_INTERVAL);
+      }
 
     const validateUser = () => {
         const userId = socket.user?.email;
@@ -321,27 +323,59 @@ const runMatchmakingCycle = async () => {
     };
 
 
-    const resetRoundState = async () => {
-        try {
-            console.warn("--- ADMIN: Resetting Round 1 State ---");
-            if(matchmakingInterval) clearInterval(matchmakingInterval);
-            if(globalTimer) clearTimeout(globalTimer);
-            if(globalTimerInterval) clearInterval(globalTimerInterval);
-            if(matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
-            matchmakingInterval = globalTimer = globalTimerInterval = matchmakingCycleInterval = null;
-            
-            const keys = Object.values(getRedisKeys());
-            await redis.del(keys);
-            
-            await prisma.match.deleteMany({ where: { problem: { roundId: 1 } } });
-            await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'LOBBY' } });
-            console.log("Round 1 state has been cleared.");
-            return true;
-        } catch (error) {
-            console.error('[Reset Error]', error);
-            return false;
+    const resetRound1Instance = async () => {
+      try {
+        console.warn("--- ADMIN: Resetting Round 1 State ---");
+
+        // 1️⃣ Stop timers
+        if (matchmakingInterval) clearInterval(matchmakingInterval);
+        if (globalTimer) clearTimeout(globalTimer);
+        if (globalTimerInterval) clearInterval(globalTimerInterval);
+        if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+
+        matchmakingInterval =
+          globalTimer =
+          globalTimerInterval =
+          matchmakingCycleInterval =
+            null;
+
+        // 2️⃣ Delete Redis keys explicitly
+        const patterns = [
+          "round1:participants",
+          "round1:readyQueue",
+          "round1:matches",
+          "round1:status",
+          "round1:status:*",
+        ];
+
+        for (const pattern of patterns) {
+          const keys = await redis.keys(pattern);
+          if (keys.length) await redis.del(keys);
         }
+
+        // 3️⃣ Reset DB state
+        await prisma.match.deleteMany({
+          where: { problem: { roundId: 1 } },
+        });
+
+        await prisma.round.update({
+          where: { roundNumber: 1 },
+          data: { status: "LOBBY" },
+        });
+
+        if (lobbyBroadcastInterval) {
+          clearInterval(lobbyBroadcastInterval);
+          lobbyBroadcastInterval = null;
+        }
+
+        console.log("✅ Round 1 state fully reset");
+        return true;
+      } catch (error) {
+        console.error("[Reset Error]", error);
+        return false;
+      }
     };
+
     
     round1MatchEndHandler = handleMatchEnd;
 
@@ -435,7 +469,6 @@ const runMatchmakingCycle = async () => {
 
 
     socket.on('disconnect', async () => {
-        clearInterval(lobbyUpdateInterval);
         const { userId, error } = validateUser();
         if (error) return;
 
@@ -568,7 +601,7 @@ const runMatchmakingCycle = async () => {
         } 
 ;
         
-        if (await resetRoundState()) {
+        if (await resetRound1Instance()) {
             io.emit('round1:reset');
             socket.emit('round1:reset:success');
         } else {
