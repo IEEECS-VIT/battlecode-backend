@@ -107,7 +107,7 @@ const startJanitor = (io) => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-const handleMatchEnd = async (matchId, winnerId) => {
+export const handleMatchEnd = async (matchId, winnerId) => {
         const keys = getRedisKeys();
         const matchStr = await redis.hget(keys.matches, matchId);
         if (!matchStr) return;

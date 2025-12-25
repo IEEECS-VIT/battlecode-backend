@@ -12,7 +12,7 @@ import {
   ScoreRound3,
 } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
-import { getRound1MatchEndHandler } from "../sockets/round1.handler.js";
+import { handleMatchEnd } from "../sockets/round1.handler.js";
 import { getRound2Handlers } from "../sockets/round2.handler.js";
 
 const router = express.Router();
@@ -343,10 +343,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         );
 
         if (isWinner) {
-          const round1MatchEndHandler = getRound1MatchEndHandler();
-          if (round1MatchEndHandler) {
-            await round1MatchEndHandler(activeMatch.id, userId);
-          }
+          await handleMatchEnd(activeMatch.id, userId);
         }
       } else {
         console.warn(`[Round 1] No active match found for user ${userId}`);
