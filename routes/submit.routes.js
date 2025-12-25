@@ -10,6 +10,7 @@ import {
   ScoreRound2,
   ScoreBounty,
   ScoreRound3,
+  ScoreCC
 } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { handleMatchEnd } from "../sockets/round1.handler.js";
@@ -333,13 +334,10 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           totalTimeInSeconds - elapsedTimeInSeconds
         );
 
-        calculatedScore = ScoreRound1(
-          timeLeftInSeconds,
+        calculatedScore = ScoreCC(
           totalCount,
           passedCount,
-          problem.difficulty,
-          isWinner,
-          executionCount
+          isWinner
         );
 
         if (isWinner) {

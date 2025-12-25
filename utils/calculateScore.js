@@ -133,3 +133,13 @@ export const Hack = (gothacked) => {
     }
     return 40;
 }
+
+export const ScoreCC = (totalcases, passedcases, win) => {
+    let score = 0;
+    if (win){
+        score += 50;
+    }
+
+    score += 50 * passedcases / totalcases;
+    return score;
+}
