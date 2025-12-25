@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -11,7 +12,8 @@ app.use(cors({
   origin: [
     "http://localhost:3000",
     "https://battlecode-frontend-cc.vercel.app",
-    "https://battlecode-backend.ieeecsvit.com"
+    "https://battlecode-backend.ieeecsvit.com",
+    "https://battlecode.ieeecsvit.com"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   credentials: true
@@ -20,9 +22,11 @@ app.use(cors({
 // Socket.io setup
 const io = new Server(httpServer, {
   cors: {
-     origin: [
+    origin: [
+      "http://localhost:3000",
       "https://battlecode-frontend-cc.vercel.app",
-      "https://battlecode-backend.ieeecsvit.com"  
+      "https://battlecode-backend.ieeecsvit.com",
+      "https://battlecode.ieeecsvit.com"
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
@@ -46,7 +50,20 @@ app.get("/", (req, res) => {
   res.send("BattleCode Backend");
 });
 
+// Socket.IO health check endpoint
+app.get("/socket.io/health", (req, res) => {
+  res.json({
+    status: "ok",
+    socketio: "running",
+    path: "/socket.io/",
+    transport: ["polling", "websocket"]
+  });
+});
+
 const PORT = process.env.PORT || 8000;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0'; // Bind to all interfaces
+
+httpServer.listen(PORT, HOST, () => {
+  console.log(`Server running on http://${HOST}:${PORT}`);
+  console.log(`Socket.IO endpoint: http://${HOST}:${PORT}/socket.io/`);
 });
