@@ -182,7 +182,7 @@ export const round1Handler = (io, socket) => {
         const unattemptedProblems = await prisma.problem.findMany({
             where: {
                 roundId: 1,
-                difficulty,
+                difficulty: { in: ['R0', 'R1_EASY'] },
                 id: { notIn: attemptedProblemIds }
             }
         });
@@ -294,7 +294,7 @@ const runMatchmakingCycle = async () => {
     const player2 = waitingPlayers[i * 2 + 1];
 
     // Optional: random difficulty
-    const difficulties = ['R1_EASY', 'R1_MEDIUM', 'R1_HARD'];
+    const difficulties = ['R0', 'R1_EASY'];
     const difficulty =
       difficulties[Math.floor(Math.random() * difficulties.length)];
 
