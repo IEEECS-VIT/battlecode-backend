@@ -97,25 +97,35 @@ export const adminHandler = (io, socket) => {
     }
   });
 
-  socket.on('admin:endRound', async ({ roundNumber }) => {
-    if (socket.user.role !== 'ADMIN') return;
+  socket.on('admin:endRound', async ({ roundNumber }, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
 
     if (!roundNumber) {
       console.warn('[ADMIN] endRound called without roundNumber');
-      return;
+      return callback?.({ success: false, error: 'Round number is required' });
     }
 
-    switch (roundNumber) {
-      case 1:
-        return endRound1(io);
-      // TODO: Add handlers for other rounds (round 2, round 3, etc.)
-      // case 2:
-      //   return endRound2(io);
-      // case 3:
-      //   return endRound3(io);
-      default:
-        console.warn(`[ADMIN] Invalid round ${roundNumber} for endRound`);
-        return;
+    try {
+      switch (roundNumber) {
+        case 1:
+          await endRound1(io);
+          return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
+        // TODO: Add handlers for other rounds (round 2, round 3, etc.)
+        // case 2:
+        //   await endRound2(io);
+        //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
+        // case 3:
+        //   await endRound3(io);
+        //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
+        default:
+          console.warn(`[ADMIN] Invalid round ${roundNumber} for endRound`);
+          return callback?.({ success: false, error: `Invalid round number: ${roundNumber}` });
+      }
+    } catch (error) {
+      console.error(`[ADMIN] Error ending round ${roundNumber}:`, error);
+      return callback?.({ success: false, error: error.message || 'Failed to end round' });
     }
   });
 
