@@ -353,7 +353,7 @@ const runMatchmakingCycle = async () => {
     };
 
     
-    round1MatchEndHandler = handleMatchEnd;
+    const round1MatchEndHandler = handleMatchEnd;
 
     socket.on('round1:join', async (payload, callback) => {
         const { userId, email, error } = validateUser();
