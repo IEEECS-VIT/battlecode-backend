@@ -16,7 +16,6 @@ let globalTimer = null;
 let globalTimerInterval = null;
 let matchmakingInterval = null;
 let matchmakingCycleInterval = null;
-let round1MatchEndHandler = null;
 let lobbyBroadcastInterval = null;
 
 
@@ -108,33 +107,7 @@ const startJanitor = (io) => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-
-export const round1Handler = (io, socket) => {
-    startJanitor(io);
-
-    if (!lobbyBroadcastInterval) {
-      lobbyBroadcastInterval = setInterval(() => broadcastLobbyUpdate(io),LOBBY_UPDATE_INTERVAL);
-      }
-
-    const validateUser = () => {
-        const userId = socket.user?.email;
-        if (!userId) return { error: 'Unauthorized' };
-        return { userId, email: userId };
-    };
-
-
-    const startMatchmakingCycleBroadcast = (roundStartTime) => {
-        if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
-        matchmakingCycleInterval = setInterval(() => {
-            const elapsed = Date.now() - roundStartTime;
-            const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
-            const nextCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
-            io.emit('round1:matchmakingCycle', { nextCycle });
-        }, 1000);
-    };
-
-
-    const handleMatchEnd = async (matchId, winnerId) => {
+const handleMatchEnd = async (matchId, winnerId) => {
         const keys = getRedisKeys();
         const matchStr = await redis.hget(keys.matches, matchId);
         if (!matchStr) return;
@@ -169,6 +142,29 @@ export const round1Handler = (io, socket) => {
         }
     };
 
+export const round1Handler = (io, socket) => {
+    startJanitor(io);
+
+    if (!lobbyBroadcastInterval) {
+      lobbyBroadcastInterval = setInterval(() => broadcastLobbyUpdate(io),LOBBY_UPDATE_INTERVAL);
+      }
+
+    const validateUser = () => {
+        const userId = socket.user?.email;
+        if (!userId) return { error: 'Unauthorized' };
+        return { userId, email: userId };
+    };
+
+
+    const startMatchmakingCycleBroadcast = (roundStartTime) => {
+        if (matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
+        matchmakingCycleInterval = setInterval(() => {
+            const elapsed = Date.now() - roundStartTime;
+            const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
+            const nextCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
+            io.emit('round1:matchmakingCycle', { nextCycle });
+        }, 1000);
+    };
 
     const getUnattemptedQuestionByDifficulty = async (difficulty, player1Id, player2Id) => {
         const submissions = await prisma.submission.findMany({
@@ -270,10 +266,6 @@ export const round1Handler = (io, socket) => {
         return array;
     };
 
-
-    
-
-
 const runMatchmakingCycle = async () => {
   const keys = getRedisKeys();
   const allParticipants = await getEnrichedParticipantsList();
@@ -307,22 +299,6 @@ const runMatchmakingCycle = async () => {
   await Promise.all(matchPromises);
   await broadcastLobbyUpdate(io);
 };
-
-
-
-    const endRound = async () => {
-        console.log("--- ROUND 1 HAS ENDED ---");
-        if(matchmakingInterval) clearInterval(matchmakingInterval);
-        if(globalTimer) clearTimeout(globalTimer);
-        if(globalTimerInterval) clearInterval(globalTimerInterval);
-        if(matchmakingCycleInterval) clearInterval(matchmakingCycleInterval);
-        matchmakingInterval = globalTimer = globalTimerInterval = matchmakingCycleInterval = null;
-        await redis.set(getRedisKeys().status, "ended");
-        await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
-        io.emit('round1:ended');
-    };
-
-
     const resetRound1Instance = async () => {
       try {
         console.warn("--- ADMIN: Resetting Round 1 State ---");
@@ -378,7 +354,6 @@ const runMatchmakingCycle = async () => {
 
     
     round1MatchEndHandler = handleMatchEnd;
-
 
     socket.on('round1:join', async (payload, callback) => {
         const { userId, email, error } = validateUser();
@@ -448,7 +423,7 @@ const runMatchmakingCycle = async () => {
         await multi.exec();
 
 
-        globalTimer = setTimeout(endRound, ROUND_DURATION);
+        globalTimer = setTimeout(() => endRound1(io), ROUND_DURATION);
         if (globalTimerInterval) clearInterval(globalTimerInterval);
         globalTimerInterval = setInterval(() => {
             const elapsed = Date.now() - roundStartTime;
@@ -610,8 +585,6 @@ const runMatchmakingCycle = async () => {
         }
     });
 };
-
-export const getRound1MatchEndHandler = () => round1MatchEndHandler;
 
 export const round1RecoveryHandler = async (io, socket, userId) => {
   try {
