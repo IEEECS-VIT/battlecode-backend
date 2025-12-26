@@ -330,9 +330,17 @@ const runMatchmakingCycle = async () => {
         }
 
         // 3️⃣ Reset DB state
-        await prisma.match.deleteMany({
-          where: { problem: { roundId: 1 } },
+        const problemIds = await prisma.problem.findMany({
+        where: { roundId: 1 },
+        select: { id: true }
         });
+
+        await prisma.match.deleteMany({
+        where: {
+          problemId: {
+          in: problemIds.map(p => p.id)
+        }
+      }});
 
         await prisma.round.update({
           where: { roundNumber: 1 },
