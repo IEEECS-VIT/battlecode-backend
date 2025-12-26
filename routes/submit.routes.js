@@ -158,6 +158,12 @@ router.post("/run", async (req, res) => {
  */
 router.post("/submit", verifyAuthToken, async (req, res) => {
   try {
+
+    const io = req.app.get("io");
+
+    if (!io) {
+      console.error("❌ IO INSTANCE NOT FOUND IN SUBMIT");
+    }
     const { language, source_code, problemId, roundNumber, context } = req.body;
     const userId = req.user?.email;
 
@@ -341,7 +347,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         );
 
         if (isWinner) {
-          await handleMatchEnd(activeMatch.id, userId);
+          await handleMatchEnd(io,activeMatch.id,   isWinner ? userId : null);
         }
       } else {
         console.warn(`[Round 1] No active match found for user ${userId}`);
