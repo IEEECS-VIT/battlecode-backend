@@ -107,7 +107,7 @@ const startJanitor = (io) => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-export const handleMatchEnd = async (matchId, winnerId) => {
+export const handleMatchEnd = async (io,matchId, winnerId) => {
         const keys = getRedisKeys();
         const matchStr = await redis.hget(keys.matches, matchId);
         if (!matchStr) return;
@@ -248,7 +248,7 @@ export const round1Handler = (io, socket) => {
                 
                 if (timeRemaining <= 0) {
                     clearInterval(timerInterval);
-                    handleMatchEnd(matchId, null);
+                    handleMatchEnd(io,matchId, null);
                 }
             }, 1000);
             
@@ -351,9 +351,6 @@ const runMatchmakingCycle = async () => {
         return false;
       }
     };
-
-    
-    const round1MatchEndHandler = handleMatchEnd;
 
     socket.on('round1:join', async (payload, callback) => {
         const { userId, email, error } = validateUser();
@@ -852,7 +849,7 @@ export const endRound1 = async (io) => {
   // end all matches
   const matches = await redis.hgetall(keys.matches);
   for (const matchId in matches) {
-    await handleMatchEnd(matchId, null);
+    await handleMatchEnd(io,matchId, null);
   }
 
   // reset participants
