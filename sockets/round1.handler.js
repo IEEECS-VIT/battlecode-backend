@@ -409,7 +409,7 @@ export const endRound1 = async (io) => {
   // end all matches
   const matches = await redis.hgetall(keys.matches);
   for (const matchId in matches) {
-    await handleMatchEnd(io,matchId, null);
+    await handleMatchEnd(io, matchId, null, true); 
   }
 
   // reset participants
