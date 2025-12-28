@@ -107,7 +107,7 @@ const startJanitor = (io) => {
     console.log('[System] Persistent timer janitor started.');
 };
 
-export const handleMatchEnd = async (io,matchId, winnerId) => {
+export const handleMatchEnd = async (io,matchId, winnerId, force_end = false) => {
         const keys = getRedisKeys();
         const matchStr = await redis.hget(keys.matches, matchId);
         if (!matchStr) return;
@@ -137,7 +137,7 @@ export const handleMatchEnd = async (io,matchId, winnerId) => {
 
             await redis.hset(keys.participants, playerId, JSON.stringify(player));
 
-            io.to(`user:${playerId}`).emit('round1:matchEnd', { type: winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout' });
+            io.to(`user:${playerId}`).emit('round1:matchEnd', { type: force_end? 'admin_end': (winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout') });
             io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
         }
     };

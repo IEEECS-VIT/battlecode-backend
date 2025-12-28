@@ -110,14 +110,14 @@ export const adminHandler = (io, socket) => {
     try {
       switch (roundNumber) {
         case 1:
-          await endRound1(io);
+          await endRound1(io, true);
           return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
         // TODO: Add handlers for other rounds (round 2, round 3, etc.)
         // case 2:
-        //   await endRound2(io);
+        //   await endRound2(io, true);
         //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
         // case 3:
-        //   await endRound3(io);
+        //   await endRound3(io, true);
         //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
         default:
           console.warn(`[ADMIN] Invalid round ${roundNumber} for endRound`);
