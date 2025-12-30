@@ -3,10 +3,10 @@ import prisma from "../config/prisma.js";
 
 
 // Constants
-const ROUND_DURATION = 90 * 60 * 1000;
+const ROUND_DURATION = 60 * 60 * 1000;
 const ROUND_NUMBER = 1;
-const MATCHMAKING_INTERVAL = 0.5 * 60 * 1000;
-const COOLDOWN_DURATION = 0.4 * 60 * 1000;
+const MATCHMAKING_INTERVAL = 3 * 60 * 1000;
+const COOLDOWN_DURATION = 0.5 * 60 * 1000;
 const JANITOR_INTERVAL = 5000;
 const LOBBY_UPDATE_INTERVAL = 5000;
 
