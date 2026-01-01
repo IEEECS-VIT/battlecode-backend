@@ -467,7 +467,7 @@ export const round1Handler = (io, socket) => {
         const unattemptedProblems = await prisma.problem.findMany({
             where: {
                 roundId: 1,
-                difficulty: { in: ['R0', 'R1_EASY'] },
+                difficulty: { in: ['R2_CHALLENGE', 'R1_MEDIUM','R1_EASY'] },
                 id: { notIn: attemptedProblemIds }
             }
         });
