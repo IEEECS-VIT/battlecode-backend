@@ -788,6 +788,113 @@ const handleRound2Reset = async (payload, callback) => {
 
 };
 
+// Admin functions
+export const round2AdminAddUser = async (io, userId) => {
+  try {
+    if (!userId) {
+      io.emit("admin:error", { error: "Invalid user email" });
+      return;
+    }
+
+    const keys = getRedisKeys(userId);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, eventScore: true, round2Role: true }
+    });
+
+    if (!user) {
+      io.emit("admin:error", { error: "User not found" });
+      return;
+    }
+
+    const roundDB = await prisma.round.findUnique({
+      where: { roundNumber: 2 }
+    });
+
+    if (!roundDB) {
+      io.emit("admin:error", { error: "Round 2 not found" });
+      return;
+    }
+
+    if (roundDB.status === "COMPLETED") {
+      io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    const existing = await redis.hget(keys.participants, userId);
+    if (existing) {
+      io.to(`user:${userId}`).emit("round2:adminAdded");
+      return;
+    }
+
+    const role = user.eventScore > ROLE_THRESHOLD_SCORE ? "elite" : "challenger";
+    const participant = {
+      id: userId,
+      username: user.username,
+      eventScore: user.eventScore,
+      role: role,
+      status: "lobby"
+    };
+
+    await redis.hset(keys.participants, userId, JSON.stringify(participant));
+    await redis.set(keys.role(userId), role);
+
+    io.to(`user:${userId}`).emit("round2:adminAdded");
+    io.emit("admin:success", { action: "add", userId, round: 2 });
+
+  } catch (err) {
+    console.error("[Admin Add User R2]", err);
+    io.emit("admin:error", { error: "Failed to add user" });
+  }
+};
+
+export const round2AdminRemoveUser = async (io, userId) => {
+  try {
+    const keys = getRedisKeys(userId);
+    const participantStr = await redis.hget(keys.participants, userId);
+    
+    if (!participantStr) {
+      io.emit("admin:error", { error: "User not in round" });
+      return;
+    }
+
+    const participant = JSON.parse(participantStr);
+
+    // If user is in match, end it
+    const matchId = await redis.get(keys.userMatch(userId));
+    if (matchId) {
+      const matchInfo = await redis.get(keys.matchInfo(matchId));
+      if (matchInfo) {
+        const match = JSON.parse(matchInfo);
+        const opponentId = match.challengerId === userId ? match.eliteId : match.challengerId;
+        
+        io.to(`match:${matchId}`).emit("round2:matchEnd", {
+          winner: opponentId,
+          reason: "opponent_removed_by_admin"
+        });
+        
+        await redis.del(keys.matchInfo(matchId));
+        await redis.del(keys.userMatch(userId));
+        await redis.del(keys.userMatch(opponentId));
+      }
+    }
+
+    // Clean up user data
+    await redis.hdel(keys.participants, userId);
+    await redis.del(keys.role(userId));
+    await redis.del(keys.cooldown(userId));
+    await redis.del(keys.activeBounty(userId));
+    await redis.del(keys.rejectCount(userId));
+
+    io.to(`user:${userId}`).emit("round2:adminRemoved");
+    io.emit("admin:success", { action: "remove", userId, round: 2 });
+
+  } catch (err) {
+    console.error("[Admin Remove User R2]", err);
+    io.emit("admin:error", { error: "Failed to remove user" });
+  }
+};
+
 export const getRound2Handlers = () => ({
   matchEndHandler,
   bountyEndHandler,

@@ -7,7 +7,7 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
  * Manages the real-time state and events for Round 3 of the competition.
  */
 
-const ROUND_DURATION = 0.5 * 60; // 30 second in seconds
+const ROUND_DURATION = 60 * 60; // 60 minutes in seconds
 const HACKING_PHASE_START_SECONDS = 0.5 * 60; // Hacking starts with 30 seconds left
 const ROUND_NUMBER = 3;
 
@@ -329,19 +329,19 @@ export const round3Handler = (io, socket) => {
     }
   };
 
-  const handleGetState = async (payload, callback) => {
+  const handleGetState = async (payload) => {
     const { userId, error } = validateUser();
-    if (error) return callback?.({ success: false, error });
+    if (error) return;
     try {
       const elapsed = globalRoundState.startTime ? Math.floor((Date.now() - globalRoundState.startTime) / 1000) : 0;
       const timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
       const locked = await prisma.lockedSolution.findMany({ where: { userId }, select: { questionId: true } });
       const lockedQuestionIds = locked.map(l => l.questionId);
       socket.join(`round${ROUND_NUMBER}`);
-      callback?.({ success: true, isActive: globalRoundState.isActive, isHackingPhase: globalRoundState.isHackingPhase, timeRemaining, questions: globalRoundState.problems, lockedQuestionIds });
+      socket.emit('round3:state', { success: true, isActive: globalRoundState.isActive, isHackingPhase: globalRoundState.isHackingPhase, timeRemaining, questions: globalRoundState.problems, lockedQuestionIds });
     } catch (err) {
       console.error('[ROUND 3] Error getting state:', err);
-      callback?.({ success: false, error: 'Failed to retrieve state.' });
+      socket.emit('round3:state', { success: false, error: 'Failed to retrieve state.' });
     }
   };
   
@@ -412,4 +412,89 @@ export const emitHackResult = (io, result) => {
         const victimPayload = { ...payload, message: `Your solution for question ${questionId} was successfully hacked by ${hackerId}!` };
         io.to(targetId).emit('round3:hacked', victimPayload);
     }
+};
+
+// Admin functions
+export const round3AdminAddUser = async (io, userId) => {
+  try {
+    if (!userId) {
+      io.emit("admin:error", { error: "Invalid user email" });
+      return;
+    }
+
+    const keys = getRedisKeys();
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, eventScore: true }
+    });
+
+    if (!user) {
+      io.emit("admin:error", { error: "User not found" });
+      return;
+    }
+
+    const roundDB = await prisma.round.findUnique({
+      where: { roundNumber: ROUND_NUMBER }
+    });
+
+    if (!roundDB) {
+      io.emit("admin:error", { error: `Round ${ROUND_NUMBER} not found` });
+      return;
+    }
+
+    if (roundDB.status === "COMPLETED") {
+      io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    const existing = await redis.hget(keys.lobby, userId);
+    if (existing) {
+      io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
+      return;
+    }
+
+    const participant = {
+      userId,
+      username: user.username,
+      email: userId,
+      eventScore: user.eventScore,
+      status: roundDB.status === 'IN_PROGRESS' ? 'IN_MATCH' : 'WAITING',
+      joinedAt: new Date().toISOString()
+    };
+
+    await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+
+    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
+    io.emit("admin:success", { action: "add", userId, round: ROUND_NUMBER });
+
+  } catch (err) {
+    console.error(`[Admin Add User R${ROUND_NUMBER}]`, err);
+    io.emit("admin:error", { error: "Failed to add user" });
+  }
+};
+
+export const round3AdminRemoveUser = async (io, userId) => {
+  try {
+    const keys = getRedisKeys();
+    const participantStr = await redis.hget(keys.lobby, userId);
+    
+    if (!participantStr) {
+      io.emit("admin:error", { error: "User not in round" });
+      return;
+    }
+
+    // Clean up user data
+    await redis.hdel(keys.lobby, userId);
+    
+    // Delete user-specific submissions and hack data if needed
+    const userStateKey = `round${ROUND_NUMBER}:user:${userId}:state`;
+    await redis.del(userStateKey);
+
+    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminRemoved`);
+    io.emit("admin:success", { action: "remove", userId, round: ROUND_NUMBER });
+
+  } catch (err) {
+    console.error(`[Admin Remove User R${ROUND_NUMBER}]`, err);
+    io.emit("admin:error", { error: "Failed to remove user" });
+  }
 };

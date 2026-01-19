@@ -837,7 +837,11 @@ export const round0Handler = (io, socket) => {
   const handleGetState = async (payload, callback) => {
     const validation = validateUser();
     if (validation.error) {
-      return callback?.({ success: false, error: validation.error });
+      socket.emit("round1:state",{
+                success: false, 
+          error: validation.error
+            });
+        return;
     }
     const { userId } = validation;
 
@@ -848,14 +852,20 @@ export const round0Handler = (io, socket) => {
       });
 
       if (!round0DB) {
-        return callback?.({ success: false, error: 'Round 0 not found in database' });
+        socket.emit("round1:state",{
+                success: false, 
+          error: 'Round 0 not found in database'
+            });
+        return;
       }
 
       if (round0DB.status !== 'IN_PROGRESS') {
-        return callback?.({ 
-          success: false, 
-          error: `Round 0 is not active. Database status: ${round0DB.status}` 
-        });
+        socket.emit("round1:state",{
+                success: false, 
+          error: `Round 0 is not active. Database status: ${round0DB.status}`
+            });
+        return;
+        
       }
 
       // Sync in-memory state with database
@@ -865,17 +875,24 @@ export const round0Handler = (io, socket) => {
       }
 
       if (!globalRoundState.isActive) {
-        return callback?.({ 
-          success: false, 
-          error: 'Round 0 is not active' 
-        });
+
+        socket.emit("round1:state",{
+                success: false, 
+          error: 'Round 0 is not active'
+            });
+        return;
+        
       }
 
       const keys = getRedisKeys(userId);
       const userStateRaw = await redis.get(keys.state);
       
       if (!userStateRaw) {
-        return callback?.({ success: false, error: 'User state not found' });
+        socket.emit("round1:state",{
+                success: false,
+                error: 'User state not found'
+            });
+        return;
       }
 
       const userState = JSON.parse(userStateRaw);
@@ -887,19 +904,29 @@ export const round0Handler = (io, socket) => {
 
       socket.join('round0');
 
-      callback?.({
-        success: true,
-        currentProblem: userState.problems[userState.currentProblemIndex],
-        problemIndex: userState.currentProblemIndex,
-        problems: userState.problems,
-        totalProblems: userState.problems.length,
-        timeRemaining,
-        progress: userProgress,
-        message: 'Current state retrieved successfully'
-      });
+      
+
+      socket.emit("round1:state",{
+                success: true,
+                pcurrentProblem: userState.problems[userState.currentProblemIndex],
+                problemIndex: userState.currentProblemIndex,
+                problems: userState.problems,
+                totalProblems: userState.problems.length,
+                isActive: currentStatus === "running",
+                timeRemaining,
+                progress: userProgress,
+                message: 'Current state retrieved successfully'
+            });
+            return;
+
+        
     } catch (error) {
       console.error('Error in round0:getState:', error);
-      callback?.({ success: false, error: 'Failed to retrieve game state' });
+      socket.emit("round1:state",{
+                success: false,
+                error: error
+            });
+      
     }
   };
 
@@ -969,6 +996,92 @@ export const round0Handler = (io, socket) => {
   ]).catch(error => {
     console.error('Error during socket initialization:', error);
   });
+};
+
+// Admin functions
+export const round0AdminAddUser = async (io, userId) => {
+  try {
+    if (!userId) {
+      io.emit("admin:error", { error: "Invalid user email" });
+      return;
+    }
+
+    const keys = getRedisKeys(userId);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, eventScore: true, role: true }
+    });
+
+    if (!user) {
+      io.emit("admin:error", { error: "User not found" });
+      return;
+    }
+
+    const roundDB = await prisma.round.findUnique({
+      where: { roundNumber: ROUND_NUMBER }
+    });
+
+    if (!roundDB) {
+      io.emit("admin:error", { error: `Round ${ROUND_NUMBER} not found` });
+      return;
+    }
+
+    if (roundDB.status === "COMPLETED") {
+      io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    const existing = await redis.hget(keys.lobby, userId);
+    if (existing) {
+      io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
+      return;
+    }
+
+    const participant = {
+      userId,
+      username: user.username,
+      email: userId,
+      role: user.role || 'USER',
+      status: roundDB.status === 'IN_PROGRESS' ? 'IN_MATCH' : 'WAITING',
+      joinedAt: new Date().toISOString(),
+      isReady: false
+    };
+
+    await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    await broadcastLobbyUpdate();
+
+    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
+    io.emit("admin:success", { action: "add", userId, round: ROUND_NUMBER });
+
+  } catch (err) {
+    console.error(`[Admin Add User R${ROUND_NUMBER}]`, err);
+    io.emit("admin:error", { error: "Failed to add user" });
+  }
+};
+
+export const round0AdminRemoveUser = async (io, userId) => {
+  try {
+    const keys = getRedisKeys(userId);
+    const participantStr = await redis.hget(keys.lobby, userId);
+    
+    if (!participantStr) {
+      io.emit("admin:error", { error: "User not in round" });
+      return;
+    }
+
+    await redis.del(keys.state);
+    await redis.del(keys.progress);
+    await redis.hdel(keys.lobby, userId);
+
+    await broadcastLobbyUpdate();
+
+    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminRemoved`);
+    io.emit("admin:success", { action: "remove", userId, round: ROUND_NUMBER });
+
+  } catch (err) {
+    console.error(`[Admin Remove User R${ROUND_NUMBER}]`, err);
+    io.emit("admin:error", { error: "Failed to remove user" });
+  }
 };
 
 // Export helper function to check round status

@@ -904,26 +904,26 @@ const runMatchmakingCycle = async () => {
       }
     });
 
-    socket.on('round1:reset', async (payload) => {
-        const { userId, error } = validateUser();
-        if (error){
-            socket.emit('user not found'); 
-            return;
-        } 
+//     socket.on('round1:reset', async (payload) => {
+//         const { userId, error } = validateUser();
+//         if (error){
+//             socket.emit('user not found'); 
+//             return;
+//         } 
 
-        const userData = await prisma.user.findUnique({ where: { id: userId, role: 'ADMIN' } });
-        if (!userData){
-            socket.emit('unauthorized'); 
-            return;
-        } 
-;
+//         const userData = await prisma.user.findUnique({ where: { id: userId, role: 'ADMIN' } });
+//         if (!userData){
+//             socket.emit('unauthorized'); 
+//             return;
+//         } 
+// ;
         
-        if (await resetRound1Instance()) {
-            io.emit('round1:reset');
-            socket.emit('round1:reset:success');
-        } else {
-            socket.emit('failed to reset round');
-            return;
-        }
-    });
+//         if (await resetRound1Instance()) {
+//             io.emit('round1:reset');
+//             socket.emit('round1:reset:success');
+//         } else {
+//             socket.emit('failed to reset round');
+//             return;
+//         }
+//     });
 };
