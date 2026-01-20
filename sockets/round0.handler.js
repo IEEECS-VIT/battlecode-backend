@@ -606,7 +606,7 @@ export const round0Handler = (io, socket) => {
   };
 
   // Handle round0:nextQuestion
-  const handleNextQuestion = async (payload, callback) => {
+  const handleNextQuestion = async (payload) => {
     let userState = null;
     let userProgress = null;
     let redisOperationsExecuted = false;
@@ -615,11 +615,13 @@ export const round0Handler = (io, socket) => {
       const { userId, error } = validateUser();
       
       if (error) {
-        return callback?.({ success: false, error });
+        socket.emit('round0:next:error', { success: false, error });
+        return;
       }
 
       if (!globalRoundState.isActive) {
-        return callback?.({ success: false, error: 'Round 0 is not active' });
+        socket.emit('round0:next:error', { success: false, error: 'Round 0 is not active' });
+        return;
       }
 
       const keys = getRedisKeys(userId);
@@ -630,11 +632,13 @@ export const round0Handler = (io, socket) => {
         userStateRaw = await redis.get(keys.state);
       } catch (error) {
         console.error('Error fetching user state:', error);
-        return callback?.({ success: false, error: 'Failed to fetch user state' });
+        socket.emit('round0:next:error', { success: false, error: 'Failed to fetch user state' });
+        return;
       }
       
       if (!userStateRaw) {
-        return callback?.({ success: false, error: 'User state not found' });
+        socket.emit('round0:next:error', { success: false, error: 'User state not found' });
+        return;
       }
 
       userState = JSON.parse(userStateRaw);
@@ -643,7 +647,8 @@ export const round0Handler = (io, socket) => {
 
       // Step 2: Validate if there's a next problem
       if (currentIndex >= problems.length - 1) {
-        return callback?.({ success: false, error: 'No more problems available' });
+        socket.emit('round0:next:error', { success: false, error: 'No more problems available' });
+        return;
       }
 
       // Step 3: Get user progress
@@ -652,7 +657,8 @@ export const round0Handler = (io, socket) => {
         userProgressRaw = await redis.get(keys.progress);
       } catch (error) {
         console.error('Error fetching user progress:', error);
-        return callback?.({ success: false, error: 'Failed to fetch user progress' });
+        socket.emit('round0:next:error', { success: false, error: 'Failed to fetch user progress' });
+        return;
       }
 
       // Step 4: Prepare updated state
@@ -678,7 +684,8 @@ export const round0Handler = (io, socket) => {
         redisOperationsExecuted = true;
       } catch (error) {
         console.error('Error executing Redis operations for nextQuestion:', error);
-        return callback?.({ success: false, error: 'Failed to move to next question' });
+        socket.emit('round0:next:error', { success: false, error: 'Failed to move to next question' });
+        return;
       }
 
       // Step 6: Calculate remaining time
@@ -687,7 +694,7 @@ export const round0Handler = (io, socket) => {
 
       console.log(`User ${userId} moved to problem ${userState.currentProblemIndex + 1}`);
 
-      callback?.({ 
+      socket.emit('round0:next', { 
         success: true, 
         problem: nextProblem,
         problemIndex: userState.currentProblemIndex,
@@ -724,7 +731,7 @@ export const round0Handler = (io, socket) => {
         }
       }
       
-      callback?.({ success: false, error: 'Failed to get next question' });
+      socket.emit('round0:next:error', { success: false, error: 'Failed to get next question' });
     }
   };
 
