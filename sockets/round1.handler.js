@@ -467,7 +467,7 @@ export const round1Handler = (io, socket) => {
         const unattemptedProblems = await prisma.problem.findMany({
             where: {
                 roundId: 1,
-                difficulty: { in: ['R0','R1_EASY'] },
+                difficulty: { in: ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'] },
                 id: { notIn: attemptedProblemIds }
             }
         });
@@ -565,28 +565,33 @@ const runMatchmakingCycle = async () => {
 
   console.log(`[Matchmaking] Random cycle with ${waitingPlayers.length} players`);
 
-  // 🔀 Shuffle randomly
-  waitingPlayers = shuffleArray(waitingPlayers);
+    try {
+          const third = Math.ceil(waitingPlayers.length / 3);
+          let g1 = waitingPlayers.slice(0, third);
+          let g2 = waitingPlayers.slice(third, 2 * third);
+          let g3 = waitingPlayers.slice(2 * third);
 
-  const matchPromises = [];
-
-  for (let i = 0; i < Math.floor(waitingPlayers.length / 2); i++) {
-    const player1 = waitingPlayers[i * 2];
-    const player2 = waitingPlayers[i * 2 + 1];
-
-    // Optional: random difficulty
-    const difficulties = ['R0', 'R1_EASY'];
-    const difficulty =
-      difficulties[Math.floor(Math.random() * difficulties.length)];
-
-    matchPromises.push(
-      createMatch(player1, player2, difficulty)
-    );
-  }
-  
+          if (g1.length % 2 !== 0 && g2.length > 0) g2.unshift(g1.pop());
+          if (g2.length % 2 !== 0 && g3.length > 0) g3.unshift(g2.pop());
+          
+          const groups = [g1, g2, g3];
+          const difficulties = ['R1_HARD', 'R1_MEDIUM', 'R1_EASY'];
+        
+          const matchPromises = [];
+          groups.forEach((group, index) => {
+          for (let i = 0; i < Math.floor(group.length / 2); i++) {
+            const player1 = group[i * 2];
+            const player2 = group[i * 2 + 1];
+          
+            matchPromises.push(createMatch(player1, player2, difficulties[index]));
+          }
+      });
 
   await Promise.all(matchPromises);
   await broadcastLobbyUpdate(io);
+      } catch (error) {
+            console.error("[Matchmaking Error]", error);
+        }
 };
     const resetRound1Instance = async () => {
       try {

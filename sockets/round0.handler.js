@@ -990,6 +990,33 @@ export const round0Handler = (io, socket) => {
 };
 
 // Admin functions
+export const endRound0 = async(io) =>{
+  const keys=getRedisKeys();
+  console.log("--- ENDING ROUND 0 ---");
+
+  initializeGlobalState();
+
+  const allParticipantsRaw = await redis.hgetall(keys.lobby);
+
+  for (const id in allParticipantsRaw) {
+    const p = JSON.parse(allParticipantsRaw[id]);
+    p.status = "FINISHED";
+    p.finishedAt = new Date().toISOString();
+    await redis.hset(keys.lobby, id, JSON.stringify(p));
+  }
+
+  await redis.del(keys.timer);
+  await redis.del(keys.problems);
+
+  await prisma.round.update({
+    where: { roundNumber: 0 },
+    data: { status: "COMPLETED" },
+  });
+  io.emit('round0:ended').emit('round0:end', { message: 'Round 0 ended' });
+
+  await broadcastLobbyUpdate(io);
+}
+
 export const round0AdminAddUser = async (io, userId) => {
   try {
     if (!userId) {
@@ -1109,5 +1136,4 @@ export const getRound0Status = async () => {
     };
   }
 };
-
 

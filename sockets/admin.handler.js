@@ -1,7 +1,7 @@
 import prisma from "../config/prisma.js";
 import redis from "../config/redis.js";
 import { getCurrentRound } from "./global.handler.js";
-import { round0AdminAddUser, round0AdminRemoveUser } from "./round0.handler.js";
+import { round0AdminAddUser, round0AdminRemoveUser, endRound0 } from "./round0.handler.js";
 import { round1AdminAddUser, round1AdminRemoveUser, endRound1 } from "./round1.handler.js";
 import { round2AdminAddUser, round2AdminRemoveUser } from "./round2.handler.js";
 import { round3AdminAddUser, round3AdminRemoveUser } from "./round3.handler.js";
@@ -151,13 +151,17 @@ export const adminHandler = (io, socket) => {
       return callback?.({ success: false, error: 'Unauthorized' });
     }
 
-    if (!roundNumber) {
+    if (roundNumber === undefined || roundNumber === null) {
       console.warn('[ADMIN] endRound called without roundNumber');
       return callback?.({ success: false, error: 'Round number is required' });
     }
 
     try {
       switch (roundNumber) {
+        case 0:
+          await endRound0(io);
+          return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
+
         case 1:
           await endRound1(io, true);
           return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
