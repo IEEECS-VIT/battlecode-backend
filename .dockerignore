@@ -1,1 +1,8 @@
 docker-compose down --volumes
+
+# Development-only files (never include in production builds)
+docker-compose.dev.yml
+docker-compose.override.yml
+.vscode/
+debug.log
+*.log

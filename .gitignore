@@ -43,3 +43,7 @@ next-env.d.ts
 
 # workspace files
 *.code-workspace
+
+# docker dev files (keep these local only)
+docker-compose.override.yml
+docker-compose.dev.yml

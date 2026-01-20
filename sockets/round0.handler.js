@@ -91,61 +91,61 @@ const resetRoundState = async () => {
 
 initializeGlobalState();
 
+// Move broadcastLobbyUpdate outside handler so it can be accessed by admin functions
+const broadcastLobbyUpdate = async (io) => {
+  try {
+    // Check database status to ensure consistency
+    const round0DB = await prisma.round.findUnique({
+      where: { roundNumber: 0 }
+    });
+
+    // Sync in-memory state with database
+    if (round0DB) {
+      const dbIsActive = round0DB.status === 'IN_PROGRESS';
+      if (dbIsActive !== globalRoundState.isActive) {
+        console.log(`Syncing in-memory state with database: DB=${round0DB.status}, Memory=${globalRoundState.isActive ? 'ACTIVE' : 'INACTIVE'}`);
+        if (!dbIsActive) {
+          initializeGlobalState();
+        }
+      }
+    }
+
+    const keys = getRedisKeys();
+    const allParticipantsRaw = await redis.hgetall(keys.lobby);
+    const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
+      userId: uid,
+      ...JSON.parse(value)
+    }));
+
+    // Calculate remaining time
+    let timeRemaining = 0;
+    if (globalRoundState.isActive && globalRoundState.startTime) {
+      const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+      timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+    }
+
+    io.to('round0').emit('lobby:round0', {
+      participants: lobbyParticipants,
+      totalParticipants: lobbyParticipants.length,
+      isActive: globalRoundState.isActive,
+      timeRemaining,
+      databaseStatus: round0DB?.status || 'UNKNOWN'
+    });
+  } catch (error) {
+    console.error('Error broadcasting lobby update:', error);
+  }
+};
+
 export const round0Handler = (io, socket) => {
   
   // UTILITY FUNCTIONS
   
   const validateUser = () => {
-    const userId = socket.user?.id;
-    const email = socket.user?.email;
-    if (!userId || !email) {
-      return { error: 'Unauthorized - No user ID or email' };
+    const userId = socket.user?.email;  // userId stores email (consistent with Round 1)
+    if (!userId) {
+      return { error: 'Unauthorized - No user email' };
     }
-    return { userId, email };
-  };
-
-  const broadcastLobbyUpdate = async () => {
-    try {
-      // Check database status to ensure consistency
-      const round0DB = await prisma.round.findUnique({
-        where: { roundNumber: 0 }
-      });
-
-      // Sync in-memory state with database
-      if (round0DB) {
-        const dbIsActive = round0DB.status === 'IN_PROGRESS';
-        if (dbIsActive !== globalRoundState.isActive) {
-          console.log(`Syncing in-memory state with database: DB=${round0DB.status}, Memory=${globalRoundState.isActive ? 'ACTIVE' : 'INACTIVE'}`);
-          if (!dbIsActive) {
-            initializeGlobalState();
-          }
-        }
-      }
-
-      const keys = getRedisKeys();
-      const allParticipantsRaw = await redis.hgetall(keys.lobby);
-      const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
-        userId: uid,
-        ...JSON.parse(value)
-      }));
-
-      // Calculate remaining time
-      let timeRemaining = 0;
-      if (globalRoundState.isActive && globalRoundState.startTime) {
-        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
-      }
-
-      io.to('round0').emit('lobby:round0', {
-        participants: lobbyParticipants,
-        totalParticipants: lobbyParticipants.length,
-        isActive: globalRoundState.isActive,
-        timeRemaining,
-        databaseStatus: round0DB?.status || 'UNKNOWN'
-      });
-    } catch (error) {
-      console.error('Error broadcasting lobby update:', error);
-    }
+    return { userId, email: userId };  // Both reference the same email value
   };
 
   const startGlobalTimer = (io) => {
@@ -235,11 +235,10 @@ export const round0Handler = (io, socket) => {
     let redisOperationsExecuted = false;
     
     try {
-      const userId = socket.user?.id;
-      const email = socket.user?.email;
+      const { userId,email, error } = validateUser();
       
-      if (!userId || !email) {
-        return callback?.({ success: false, error: 'Unauthorized - No user ID or email' });
+      if (error) {
+        return callback?.({ success: false, error });
       }
 
       // Check round status from database first
@@ -267,7 +266,7 @@ export const round0Handler = (io, socket) => {
       // Step 1: Fetch and validate user data from database first
       try {
         userData = await prisma.user.findUnique({
-          where: { id: email },
+          where: { id: userId },
           select: { id: true, username: true, role: true }
         });
       } catch (error) {
@@ -334,9 +333,10 @@ export const round0Handler = (io, socket) => {
 
       // Step 6: Join socket room
       socket.join('round0');
+      socket.join(`user:${userId}`);
 
       // Step 7: Broadcast lobby update to all participants
-      await broadcastLobbyUpdate();
+      await broadcastLobbyUpdate(io);
 
       console.log(`User ${username} (${userId}) joined Round 0 lobby`);
       
@@ -380,11 +380,10 @@ export const round0Handler = (io, socket) => {
     let participantsToUpdate = [];
     
     try {
-      const userId = socket.user?.id;
-      const email = socket.user?.email;
+      const { userId, error } = validateUser();
 
-      if (!userId || !email) {
-        return callback?.({ success: false, error: 'Unauthorized' });
+      if (error) {
+        return callback?.({ success: false, error });
       }
 
       // Check if round is already active (early check)
@@ -407,7 +406,7 @@ export const round0Handler = (io, socket) => {
       // Step 1: Fetch and validate user data from database
       try {
         userData = await prisma.user.findUnique({
-          where: { id: email },
+          where: { id: userId },
           select: { id: true, username: true, role: true }
         });
       } catch (error) {
@@ -613,10 +612,10 @@ export const round0Handler = (io, socket) => {
     let redisOperationsExecuted = false;
     
     try {
-      const userId = socket.user?.id;
+      const { userId, error } = validateUser();
       
-      if (!userId) {
-        return callback?.({ success: false, error: 'Unauthorized' });
+      if (error) {
+        return callback?.({ success: false, error });
       }
 
       if (!globalRoundState.isActive) {
@@ -702,7 +701,7 @@ export const round0Handler = (io, socket) => {
       // Rollback: Reset user state if Redis operations were executed
       if (redisOperationsExecuted && userState) {
         try {
-          const keys = getRedisKeys(socket.user?.id);
+          const keys = getRedisKeys(socket.user?.email);
           
           // Rollback user state
           const rollbackUserState = { ...userState };
@@ -732,7 +731,7 @@ export const round0Handler = (io, socket) => {
   // Handle disconnect
   const handleDisconnect = async () => {
     try {
-      const userId = socket.user?.id;
+      const userId = socket.user?.email;
       if (!userId) return;
 
       const keys = getRedisKeys(userId);
@@ -752,7 +751,7 @@ export const round0Handler = (io, socket) => {
         }
 
         // Broadcast updated lobby state
-        await broadcastLobbyUpdate();
+        await broadcastLobbyUpdate(io);
       }
 
       // Remove user presence
@@ -770,6 +769,10 @@ export const round0Handler = (io, socket) => {
   // Handle reconnection - Emit round0:reconnect
   const handleReconnection = async (userId) => {
     try {
+      // Join socket rooms
+      socket.join('round0');
+      socket.join(`user:${userId}`);
+
       if (!globalRoundState.isActive) {
         socket.emit('round0:reconnect', {
           success: false,
@@ -834,38 +837,35 @@ export const round0Handler = (io, socket) => {
     }
   };
 
-  const handleGetState = async (payload, callback) => {
-    const validation = validateUser();
-    if (validation.error) {
-      socket.emit("round1:state",{
-                success: false, 
-          error: validation.error
-            });
-        return;
-    }
-    const { userId } = validation;
-
+  const handleGetState = async (payload) => {
     try {
+      const validation = validateUser();
+      if (validation.error) {
+        socket.emit('round0:state', { success: false, error: validation.error });
+        return;
+      }
+      const { userId } = validation;
+
+      // Join socket rooms
+      socket.join('round0');
+      socket.join(`user:${userId}`);
+
       // Check database status first
       const round0DB = await prisma.round.findUnique({
         where: { roundNumber: 0 }
       });
 
       if (!round0DB) {
-        socket.emit("round1:state",{
-                success: false, 
-          error: 'Round 0 not found in database'
-            });
+        socket.emit('round0:state', { success: false, error: 'Round 0 not found in database' });
         return;
       }
 
       if (round0DB.status !== 'IN_PROGRESS') {
-        socket.emit("round1:state",{
-                success: false, 
-          error: `Round 0 is not active. Database status: ${round0DB.status}`
-            });
+        socket.emit('round0:state', { 
+          success: false, 
+          error: `Round 0 is not active. Database status: ${round0DB.status}` 
+        });
         return;
-        
       }
 
       // Sync in-memory state with database
@@ -875,23 +875,15 @@ export const round0Handler = (io, socket) => {
       }
 
       if (!globalRoundState.isActive) {
-
-        socket.emit("round1:state",{
-                success: false, 
-          error: 'Round 0 is not active'
-            });
+        socket.emit('round0:state', { success: false, error: 'Round 0 is not active' });
         return;
-        
       }
 
       const keys = getRedisKeys(userId);
       const userStateRaw = await redis.get(keys.state);
       
       if (!userStateRaw) {
-        socket.emit("round1:state",{
-                success: false,
-                error: 'User state not found'
-            });
+        socket.emit('round0:state', { success: false, error: 'User state not found' });
         return;
       }
 
@@ -904,90 +896,82 @@ export const round0Handler = (io, socket) => {
 
       socket.join('round0');
 
-      
+      socket.emit('round0:state', {
+        success: true,
+        currentProblem: userState.problems[userState.currentProblemIndex],
+        problemIndex: userState.currentProblemIndex,
+        problems: userState.problems,
+        totalProblems: userState.problems.length,
+        isActive: globalRoundState.isActive,
+        timeRemaining,
+        progress: userProgress,
+        message: 'Current state retrieved successfully'
+      });
 
-      socket.emit("round1:state",{
-                success: true,
-                pcurrentProblem: userState.problems[userState.currentProblemIndex],
-                problemIndex: userState.currentProblemIndex,
-                problems: userState.problems,
-                totalProblems: userState.problems.length,
-                isActive: currentStatus === "running",
-                timeRemaining,
-                progress: userProgress,
-                message: 'Current state retrieved successfully'
-            });
-            return;
-
-        
     } catch (error) {
       console.error('Error in round0:getState:', error);
-      socket.emit("round1:state",{
-                success: false,
-                error: error
-            });
-      
+      socket.emit('round0:state', { success: false, error: 'Failed to get current state' });
     }
   };
 
   // Handle round0:reset (Admin only)
-  const handleReset = async (payload, callback) => {
-    const validation = validateUser();
-    if (validation.error) {
-      return callback?.({ success: false, error: validation.error });
-    }
-    const { email } = validation;
+  // const handleReset = async (payload, callback) => {
+  //   const validation = validateUser();
+  //   if (validation.error) {
+  //     return callback?.({ success: false, error: validation.error });
+  //   }
+  //   const { email } = validation;
 
-    try {
-      // Check if user is admin
-      const userData = await prisma.user.findUnique({
-        where: { id: email },
-        select: { role: true }
-      });
+  //   try {
+  //     // Check if user is admin
+  //     const userData = await prisma.user.findUnique({
+  //       where: { id: email },
+  //       select: { role: true }
+  //     });
 
-      if (!userData || userData.role !== 'ADMIN') {
-        return callback?.({ success: false, error: 'Only admins can reset Round 0' });
-      }
+  //     if (!userData || userData.role !== 'ADMIN') {
+  //       return callback?.({ success: false, error: 'Only admins can reset Round 0' });
+  //     }
 
-      const success = await resetRoundState();
+  //     const success = await resetRoundState();
       
-      if (success) {
-        // Update database status back to LOBBY
-        await prisma.round.update({
-          where: { roundNumber: 0 },
-          data: { status: 'LOBBY' }
-        });
+  //     if (success) {
+  //       // Update database status back to LOBBY
+  //       await prisma.round.update({
+  //         where: { roundNumber: 0 },
+  //         data: { status: 'LOBBY' }
+  //       });
         
-        // Notify all clients about the reset
-        io.emit('round0:reset', { message: 'Round 0 has been reset by admin' });
+  //       // Notify all clients about the reset
+  //       io.emit('round0:reset', { message: 'Round 0 has been reset by admin' });
         
-        console.log(`Round 0 reset by admin`);
-      }
+  //       console.log(`Round 0 reset by admin`);
+  //     }
 
-      callback?.({ 
-        success, 
-        message: success ? 'Round 0 reset successfully' : 'Failed to reset Round 0'
-      });
+  //     callback?.({ 
+  //       success, 
+  //       message: success ? 'Round 0 reset successfully' : 'Failed to reset Round 0'
+  //     });
 
-    } catch (error) {
-      console.error('Error in round0:reset:', error);
-      callback?.({ success: false, error: 'Failed to reset Round 0' });
-    }
-  };
+  //   } catch (error) {
+  //     console.error('Error in round0:reset:', error);
+  //     callback?.({ success: false, error: 'Failed to reset Round 0' });
+  //   }
+  // };
 
   // EVENT LISTENERS
   socket.on('round0:join', handleJoinLobby);
   socket.on('round0:ready', handleAdminReady); 
   socket.on('round0:nextQuestion', handleNextQuestion);
   socket.on('round0:getState', handleGetState);
-  socket.on('round0:reset', handleReset);
+  // socket.on('round0:reset', handleReset);
   socket.on('disconnect', handleDisconnect);
 
   // INITIALIZATION
   Promise.all([
     syncGlobalStateWithRedis(),
     (() => {
-      const userId = socket.user?.id;
+      const userId = socket.user?.email;
       if (userId && globalRoundState.isActive) {
         return handleReconnection(userId);
       }
@@ -1048,7 +1032,7 @@ export const round0AdminAddUser = async (io, userId) => {
     };
 
     await redis.hset(keys.lobby, userId, JSON.stringify(participant));
-    await broadcastLobbyUpdate();
+    await broadcastLobbyUpdate(io);
 
     io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
     io.emit("admin:success", { action: "add", userId, round: ROUND_NUMBER });
@@ -1073,7 +1057,7 @@ export const round0AdminRemoveUser = async (io, userId) => {
     await redis.del(keys.progress);
     await redis.hdel(keys.lobby, userId);
 
-    await broadcastLobbyUpdate();
+    await broadcastLobbyUpdate(io);
 
     io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminRemoved`);
     io.emit("admin:success", { action: "remove", userId, round: ROUND_NUMBER });

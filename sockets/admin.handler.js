@@ -68,53 +68,81 @@ export const adminHandler = (io, socket) => {
     }
   };
 
-    socket.on('admin:adduser', async ({ user, round }) => {
-    if (socket.user.role !== 'ADMIN') return;
+  socket.on('admin:adduser', async ({ user, round }, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      console.warn(`[ADMIN] Unauthorized adduser attempt by ${socket.user.email}`);
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
 
     const userId = user?.email;
     if (!userId) {
       console.warn('[ADMIN] adduser called without user email');
-      return;
+      return callback?.({ success: false, error: 'User email is required' });
     }
     const roundNumber = round;
 
-    switch (roundNumber) {
-      case 0:
-        return round0AdminAddUser(io, userId);
-      case 1:
-        return round1AdminAddUser(io, userId);
-      case 2:
-        return round2AdminAddUser(io, userId);
-      case 3:
-        return round3AdminAddUser(io, userId);
-      default:
-        console.warn(`[ADMIN] Invalid round ${roundNumber} for adduser`);
-        return;
+    try {
+      console.log(`[ADMIN] Adding user ${userId} to round ${roundNumber}`);
+      
+      switch (roundNumber) {
+        case 0:
+          await round0AdminAddUser(io, userId);
+          return callback?.({ success: true, message: `User added to round ${roundNumber}` });
+        case 1:
+          await round1AdminAddUser(io, userId);
+          return callback?.({ success: true, message: `User added to round ${roundNumber}` });
+        case 2:
+          await round2AdminAddUser(io, userId);
+          return callback?.({ success: true, message: `User added to round ${roundNumber}` });
+        case 3:
+          await round3AdminAddUser(io, userId);
+          return callback?.({ success: true, message: `User added to round ${roundNumber}` });
+        default:
+          console.warn(`[ADMIN] Invalid round ${roundNumber} for adduser`);
+          return callback?.({ success: false, error: `Invalid round number: ${roundNumber}` });
+      }
+    } catch (error) {
+      console.error(`[ADMIN] Error adding user to round ${roundNumber}:`, error);
+      return callback?.({ success: false, error: error.message || 'Failed to add user' });
     }
   });
 
-  socket.on('admin:removeuser', async ({ user, round }) => {
-    if (socket.user.role !== 'ADMIN') return;
+  socket.on('admin:removeuser', async ({ user, round }, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      console.warn(`[ADMIN] Unauthorized removeuser attempt by ${socket.user.email}`);
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
 
     const userId = user?.email;
     if (!userId) {
       console.warn('[ADMIN] removeuser called without user email');
-      return;
+      return callback?.({ success: false, error: 'User email is required' });
     }
     const roundNumber = round;
 
-    switch (roundNumber) {
-      case 0:
-        return round0AdminRemoveUser(io, userId);
-      case 1:
-        return round1AdminRemoveUser(io, userId);
-      case 2:
-        return round2AdminRemoveUser(io, userId);
-      case 3:
-        return round3AdminRemoveUser(io, userId);
-      default:
-        console.warn(`[ADMIN] Invalid round ${roundNumber} for removeuser`);
-        return;
+    try {
+      console.log(`[ADMIN] Removing user ${userId} from round ${roundNumber}`);
+      
+      switch (roundNumber) {
+        case 0:
+          await round0AdminRemoveUser(io, userId);
+          return callback?.({ success: true, message: `User removed from round ${roundNumber}` });
+        case 1:
+          await round1AdminRemoveUser(io, userId);
+          return callback?.({ success: true, message: `User removed from round ${roundNumber}` });
+        case 2:
+          await round2AdminRemoveUser(io, userId);
+          return callback?.({ success: true, message: `User removed from round ${roundNumber}` });
+        case 3:
+          await round3AdminRemoveUser(io, userId);
+          return callback?.({ success: true, message: `User removed from round ${roundNumber}` });
+        default:
+          console.warn(`[ADMIN] Invalid round ${roundNumber} for removeuser`);
+          return callback?.({ success: false, error: `Invalid round number: ${roundNumber}` });
+      }
+    } catch (error) {
+      console.error(`[ADMIN] Error removing user from round ${roundNumber}:`, error);
+      return callback?.({ success: false, error: error.message || 'Failed to remove user' });
     }
   });
 

@@ -1,0 +1,6 @@
+
+#with debugging
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# Production/Normal (no debugging)
+docker-compose up -d  
