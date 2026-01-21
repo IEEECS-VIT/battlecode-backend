@@ -1012,7 +1012,8 @@ export const endRound0 = async(io) =>{
     where: { roundNumber: 0 },
     data: { status: "COMPLETED" },
   });
-  io.emit('round0:ended').emit('round0:end', { message: 'Round 0 ended' });
+ 
+  io.to('round0').emit('round0:ended', { message: 'Round 0 has ended!' });
 
   await broadcastLobbyUpdate(io);
 }

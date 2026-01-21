@@ -163,7 +163,7 @@ export const adminHandler = (io, socket) => {
           return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
 
         case 1:
-          await endRound1(io, true);
+          await endRound1(io);
           return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
         // TODO: Add handlers for other rounds (round 2, round 3, etc.)
         // case 2:
