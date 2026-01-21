@@ -4,7 +4,7 @@ import { getCurrentRound } from "./global.handler.js";
 import { round0AdminAddUser, round0AdminRemoveUser, endRound0 } from "./round0.handler.js";
 import { round1AdminAddUser, round1AdminRemoveUser, endRound1 } from "./round1.handler.js";
 import { round2AdminAddUser, round2AdminRemoveUser } from "./round2.handler.js";
-import { round3AdminAddUser, round3AdminRemoveUser } from "./round3.handler.js";
+import { round3AdminAddUser, round3AdminRemoveUser,endRound3 } from "./round3.handler.js";
 
 export const adminHandler = (io, socket) => {
   // Check if user is admin
@@ -171,7 +171,7 @@ export const adminHandler = (io, socket) => {
           break;
 
           case 3:
-          //await endRound3(io, true);
+          await endRound3(io, true);
           break;
 
           default:

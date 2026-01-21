@@ -1,5 +1,6 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
+import { getCurrentRound } from "./global.handler.js";
 import { HackStatus, SubmissionStatus } from '@prisma/client';
 
 /**
@@ -491,10 +492,68 @@ export const round3AdminRemoveUser = async (io, userId) => {
     await redis.del(userStateKey);
 
     io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminRemoved`);
+
+    // Get updated participants and broadcast to all
+    const allParticipantsStr = await redis.hgetall(keys.lobby);
+    const allParticipants = Object.values(allParticipantsStr).map(p => JSON.parse(p));
+    const isRoundActive = allParticipants.length > 0;
+    
+    io.emit('lobby:round3', { 
+      participants: allParticipants   });
+
     io.emit("admin:success", { action: "remove", userId, round: ROUND_NUMBER });
 
   } catch (err) {
     console.error(`[Admin Remove User R${ROUND_NUMBER}]`, err);
     io.emit("admin:error", { error: "Failed to remove user" });
+  }
+};
+
+export const endRound3 = async (io) => {
+  console.log('--- ENDING ROUND 3 ---');
+
+  const keys = getRedisKeys();
+
+  try {
+    // 1️⃣ Stop timer safely
+    if (globalRoundState.timerInterval) {
+      clearInterval(globalRoundState.timerInterval);
+      globalRoundState.timerInterval = null;
+    }
+
+    // 2️⃣ Mark round as completed in DB
+    await prisma.round.update({
+      where: { roundNumber: ROUND_NUMBER },
+      data: { status: 'COMPLETED' },
+    });
+
+    // 3️⃣ Update Redis round state
+    await redis.set(keys.state, 'COMPLETED');
+
+    // 4️⃣ Update participants in lobby (optional but good hygiene)
+    const allParticipantsRaw = await redis.hgetall(keys.lobby);
+    for (const userId in allParticipantsRaw) {
+      const participant = JSON.parse(allParticipantsRaw[userId]);
+      participant.status = 'FINISHED';
+      participant.finishedAt = new Date().toISOString();
+      await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    }
+
+    // 5️⃣ Notify players
+    io.to(`round${ROUND_NUMBER}`).emit('round3:ended', {
+      message: 'Round 3 has ended!',
+    });
+
+    // 6️⃣ Reset in-memory state (DO NOT wipe hack data here)
+    initializeGlobalState();
+
+    // 7️⃣ 🔥 Notify admin dashboard (THIS IS CRITICAL)
+    const currentRound = await getCurrentRound();
+    io.emit('server:currentRound', currentRound);
+
+    console.log('[ROUND 3] Round ended successfully.');
+  } catch (error) {
+    console.error('[ROUND 3] Error ending round:', error);
+    throw error;
   }
 };
