@@ -160,22 +160,29 @@ export const adminHandler = (io, socket) => {
       switch (roundNumber) {
         case 0:
           await endRound0(io);
-          return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
+          break;
 
         case 1:
           await endRound1(io);
-          return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
-        // TODO: Add handlers for other rounds (round 2, round 3, etc.)
-        // case 2:
-        //   await endRound2(io, true);
-        //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
-        // case 3:
-        //   await endRound3(io, true);
-        //   return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
-        default:
+          break;
+      
+          case 2:
+          //await endRound2(io, true);
+          break;
+
+          case 3:
+          //await endRound3(io, true);
+          break;
+
+          default:
           console.warn(`[ADMIN] Invalid round ${roundNumber} for endRound`);
           return callback?.({ success: false, error: `Invalid round number: ${roundNumber}` });
       }
+
+        const currentRound = await getCurrentRound();
+        io.emit("server:currentRound", currentRound);
+
+        return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
     } catch (error) {
       console.error(`[ADMIN] Error ending round ${roundNumber}:`, error);
       return callback?.({ success: false, error: error.message || 'Failed to end round' });
