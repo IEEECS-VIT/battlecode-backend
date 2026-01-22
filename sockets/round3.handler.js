@@ -165,7 +165,7 @@ export const round3Handler = (io, socket) => {
       }
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, username: true, role: true } });
       if (!user) return callback?.({ success: false, error: 'User not found.' });
-      const participantData = { userId: user.id, username: user.username, status: 'LOBBY' };
+      const participantData = { userId: user.id, username: user.username, status: 'lobby' }; // lowercase for Redis
       await redis.hset(getRedisKeys().lobby, userId, JSON.stringify(participantData));
       socket.join(`round${ROUND_NUMBER}`);
       await broadcastLobbyUpdate();
@@ -334,12 +334,27 @@ export const round3Handler = (io, socket) => {
     const { userId, error } = validateUser();
     if (error) return;
     try {
+      const keys = getRedisKeys();
       const elapsed = globalRoundState.startTime ? Math.floor((Date.now() - globalRoundState.startTime) / 1000) : 0;
       const timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
       const locked = await prisma.lockedSolution.findMany({ where: { userId }, select: { questionId: true } });
       const lockedQuestionIds = locked.map(l => l.questionId);
+      
+      // Get participants list from Redis
+      const allParticipantsRaw = await redis.hgetall(keys.lobby);
+      const participants = Object.values(allParticipantsRaw).map(p => JSON.parse(p));
+      
       socket.join(`round${ROUND_NUMBER}`);
-      socket.emit('round3:state', { success: true, isActive: globalRoundState.isActive, isHackingPhase: globalRoundState.isHackingPhase, timeRemaining, questions: globalRoundState.problems, lockedQuestionIds });
+      socket.emit('round3:state', { 
+        success: true, 
+        isActive: globalRoundState.isActive, 
+        isHackingPhase: globalRoundState.isHackingPhase, 
+        timeRemaining, 
+        questions: globalRoundState.problems, 
+        lockedQuestionIds,
+        participants,
+        totalParticipants: participants.length
+      });
     } catch (err) {
       console.error('[ROUND 3] Error getting state:', err);
       socket.emit('round3:state', { success: false, error: 'Failed to retrieve state.' });
@@ -459,7 +474,7 @@ export const round3AdminAddUser = async (io, userId) => {
       username: user.username,
       email: userId,
       eventScore: user.eventScore,
-      status: roundDB.status === 'IN_PROGRESS' ? 'IN_MATCH' : 'WAITING',
+      status: roundDB.status === 'IN_PROGRESS' ? 'in_match' : 'waiting', // lowercase for Redis
       joinedAt: new Date().toISOString()
     };
 
@@ -534,7 +549,7 @@ export const endRound3 = async (io) => {
     const allParticipantsRaw = await redis.hgetall(keys.lobby);
     for (const userId in allParticipantsRaw) {
       const participant = JSON.parse(allParticipantsRaw[userId]);
-      participant.status = 'FINISHED';
+      participant.status = 'finished'; // lowercase for Redis
       participant.finishedAt = new Date().toISOString();
       await redis.hset(keys.lobby, userId, JSON.stringify(participant));
     }

@@ -70,7 +70,7 @@ const resetRoundState = async () => {
     
     for (const [participantId, participantDataRaw] of Object.entries(allParticipantsRaw)) {
       const participantData = JSON.parse(participantDataRaw);
-      participantData.status = 'WAITING';
+      participantData.status = 'lobby'; // lowercase for Redis
       resetPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
       
       const userKeys = getRedisKeys(participantId);
@@ -99,9 +99,9 @@ const broadcastLobbyUpdate = async (io) => {
       where: { roundNumber: 0 }
     });
 
-    // Sync in-memory state with database
+    // Sync in-memory state with database (DB uses UPPERCASE)
     if (round0DB) {
-      const dbIsActive = round0DB.status === 'IN_PROGRESS';
+      const dbIsActive = round0DB.status === 'IN_PROGRESS'; // UPPERCASE check
       if (dbIsActive !== globalRoundState.isActive) {
         console.log(`Syncing in-memory state with database: DB=${round0DB.status}, Memory=${globalRoundState.isActive ? 'ACTIVE' : 'INACTIVE'}`);
         if (!dbIsActive) {
@@ -129,7 +129,7 @@ const broadcastLobbyUpdate = async (io) => {
       totalParticipants: lobbyParticipants.length,
       isActive: globalRoundState.isActive,
       timeRemaining,
-      databaseStatus: round0DB?.status || 'UNKNOWN'
+      databaseStatus: round0DB?.status || 'unknown'
     });
   } catch (error) {
     console.error('Error broadcasting lobby update:', error);
@@ -165,7 +165,7 @@ export const round0Handler = (io, socket) => {
           try {
             await prisma.round.update({
               where: { roundNumber: 0 },
-              data: { status: 'COMPLETED' }
+              data: { status: 'COMPLETED' } // UPPERCASE for database
             });
           } catch (error) {
             console.error('Error updating Round 0 database status to COMPLETED:', error);
@@ -181,7 +181,7 @@ export const round0Handler = (io, socket) => {
           const allParticipantsRaw = await redis.hgetall(keys.lobby);
           for (const [participantId, participantDataRaw] of Object.entries(allParticipantsRaw)) {
             const participantData = JSON.parse(participantDataRaw);
-            participantData.status = 'FINISHED';
+            participantData.status = 'finished'; // lowercase for Redis
             participantData.finishedAt = new Date().toISOString();
             await redis.hset(keys.lobby, participantId, JSON.stringify(participantData));
           }
@@ -250,7 +250,7 @@ export const round0Handler = (io, socket) => {
         return callback?.({ success: false, error: 'Round 0 not found in database' });
       }
 
-      if (round0DB.status !== 'LOBBY') {
+      if (round0DB.status !== 'LOBBY') { // UPPERCASE check
         return callback?.({ 
           success: false, 
           error: `Round 0 is not in LOBBY status. Current status: ${round0DB.status}` 
@@ -258,7 +258,7 @@ export const round0Handler = (io, socket) => {
       }
 
       // Update in-memory state to match database
-      if (round0DB.status === 'LOBBY' && globalRoundState.isActive) {
+      if (round0DB.status === 'LOBBY' && globalRoundState.isActive) { // UPPERCASE check
         console.log('Database shows LOBBY but in-memory state shows active. Resetting in-memory state.');
         initializeGlobalState();
       }
@@ -279,7 +279,7 @@ export const round0Handler = (io, socket) => {
       }
 
       const username = userData.username || 'Anonymous';
-      const userRole = userData.role || 'USER';
+      const userRole = userData.role || 'PLAYER';
       const joinedAt = new Date().toISOString();
       const keys = getRedisKeys(userId);
 
@@ -289,7 +289,7 @@ export const round0Handler = (io, socket) => {
         username,
         email,
         role: userRole,
-        status: 'WAITING',
+        status: 'lobby', // lowercase for Redis
         joinedAt,
         isReady: false
       };
@@ -396,7 +396,7 @@ export const round0Handler = (io, socket) => {
         where: { roundNumber: 0 }
       });
 
-      if (!round0DB || round0DB.status !== 'LOBBY') {
+      if (!round0DB || round0DB.status !== 'LOBBY') { // UPPERCASE check
         return callback?.({ 
           success: false, 
           error: `Round 0 is not in LOBBY status. Current status: ${round0DB?.status || 'Not found'}` 
@@ -418,7 +418,7 @@ export const round0Handler = (io, socket) => {
         return callback?.({ success: false, error: 'User not found in database' });
       }
 
-      const userRole = userData.role || 'USER';
+      const userRole = userData.role || 'PLAYER';
 
       if (userRole !== 'ADMIN') {
         return callback?.({ success: false, error: 'Only admins can start Round 0' });
@@ -458,7 +458,7 @@ export const round0Handler = (io, socket) => {
       // Prepare participant updates
       for (const [participantId, participantDataRaw] of Object.entries(allParticipantsRaw)) {
         const participantData = JSON.parse(participantDataRaw);
-        participantData.status = 'IN_MATCH';
+        participantData.status = 'in_match'; // lowercase for Redis
         participantsToUpdate.push({ participantId, participantData });
         
         // Update lobby
@@ -497,7 +497,7 @@ export const round0Handler = (io, socket) => {
       try {
         await prisma.round.update({
           where: { roundNumber: 0 },
-          data: { status: 'IN_PROGRESS' }
+          data: { status: 'IN_PROGRESS' } // UPPERCASE for database
         });
         console.log('Round 0 database status updated to IN_PROGRESS');
       } catch (error) {
@@ -514,7 +514,7 @@ export const round0Handler = (io, socket) => {
             // Reset participant status
             const participantData = globalRoundState.participants.get(participantId);
             if (participantData) {
-              participantData.status = 'WAITING';
+              participantData.status = 'waiting';
               rollbackPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
             }
           });
@@ -580,8 +580,8 @@ export const round0Handler = (io, socket) => {
           const keys = getRedisKeys();
           
           participantsToUpdate.forEach(({ participantId, participantData }) => {
-            // Reset status back to WAITING
-            participantData.status = 'WAITING';
+            // Reset status back to waiting
+            participantData.status = 'waiting';
             rollbackPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
             
             // Remove user state and progress
@@ -747,7 +747,7 @@ export const round0Handler = (io, socket) => {
       const participantRaw = await redis.hget(keys.lobby, userId);
       if (participantRaw) {
         const participant = JSON.parse(participantRaw);
-        participant.status = 'DISCONNECTED';
+        participant.status = 'disconnected'; // lowercase for Redis
         participant.disconnectedAt = new Date().toISOString();
         
         await redis.hset(keys.lobby, userId, JSON.stringify(participant));
@@ -814,7 +814,7 @@ export const round0Handler = (io, socket) => {
       const participantRaw = await redis.hget(keys.lobby, userId);
       if (participantRaw) {
         const participant = JSON.parse(participantRaw);
-        participant.status = 'IN_MATCH';
+        participant.status = 'in_match'; // lowercase for Redis
         participant.reconnectedAt = new Date().toISOString();
         await redis.hset(keys.lobby, userId, JSON.stringify(participant));
       }
@@ -867,33 +867,87 @@ export const round0Handler = (io, socket) => {
         return;
       }
 
-      if (round0DB.status !== 'IN_PROGRESS') {
-        socket.emit('round0:state', { 
-          success: false, 
-          error: `Round 0 is not active. Database status: ${round0DB.status}` 
+      const keys = getRedisKeys(userId);
+      const lobbyKeys = getRedisKeys();
+
+      // Always get lobby participants
+      const allParticipantsRaw = await redis.hgetall(lobbyKeys.lobby);
+      const allParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
+        userId: uid,
+        ...JSON.parse(value)
+      }));
+
+      // Find current user's participant data
+      const participant = allParticipants.find(p => p.userId === userId) || null;
+
+      // If round is not active or user not in lobby, return lobby-only state
+      if (round0DB.status !== 'IN_PROGRESS' || !participant) { // UPPERCASE check
+        socket.emit('round0:state', {
+          success: true,
+          isActive: false,
+          participant,
+          allParticipants,
+          totalParticipants: allParticipants.length,
+          currentProblem: null,
+          problemIndex: null,
+          problems: null,
+          totalProblems: null,
+          timeRemaining: 0,
+          progress: null,
+          startTime: null,
+          databaseStatus: round0DB.status, // Return UPPERCASE status
+          message: round0DB.status === 'LOBBY' ? 'Round not started yet' : 'Round ended' // UPPERCASE check
         });
         return;
       }
 
-      // Sync in-memory state with database
-      if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') {
+      // Sync in-memory state with database if needed
+      if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') { // UPPERCASE check
         console.log('Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
         await syncGlobalStateWithRedis();
       }
 
       if (!globalRoundState.isActive) {
-        socket.emit('round0:state', { success: false, error: 'Round 0 is not active' });
+        socket.emit('round0:state', { 
+          success: false, 
+          error: 'Round 0 is not active',
+          allParticipants,
+          totalParticipants: allParticipants.length,
+          currentProblem: null,
+          problemIndex: null,
+          problems: null,
+          totalProblems: null,
+          timeRemaining: 0,
+          progress: null,
+          startTime: null
+        });
         return;
       }
 
-      const keys = getRedisKeys(userId);
+      // Get user's match state
       const userStateRaw = await redis.get(keys.state);
       
       if (!userStateRaw) {
-        socket.emit('round0:state', { success: false, error: 'User state not found' });
+        // User is in lobby but doesn't have match state yet
+        socket.emit('round0:state', {
+          success: true,
+          isActive: true,
+          participant,
+          allParticipants,
+          totalParticipants: allParticipants.length,
+          currentProblem: null,
+          problemIndex: null,
+          problems: null,
+          totalProblems: null,
+          timeRemaining: 0,
+          progress: null,
+          startTime: null,
+          message: 'Waiting in lobby'
+        });
         return;
       }
 
+      // User has active match state
       const userState = JSON.parse(userStateRaw);
       const userProgressRaw = await redis.get(keys.progress);
       const userProgress = userProgressRaw ? JSON.parse(userProgressRaw) : {};
@@ -901,17 +955,20 @@ export const round0Handler = (io, socket) => {
       const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
       const timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
 
-      socket.join('round0');
-
+      // Return full match state
       socket.emit('round0:state', {
         success: true,
+        isActive: true,
+        participant,
+        allParticipants,
+        totalParticipants: allParticipants.length,
         currentProblem: userState.problems[userState.currentProblemIndex],
         problemIndex: userState.currentProblemIndex,
         problems: userState.problems,
         totalProblems: userState.problems.length,
-        isActive: globalRoundState.isActive,
         timeRemaining,
         progress: userProgress,
+        startTime: globalRoundState.startTime,
         message: 'Current state retrieved successfully'
       });
 
@@ -1000,7 +1057,7 @@ export const endRound0 = async(io) =>{
 
   for (const id in allParticipantsRaw) {
     const p = JSON.parse(allParticipantsRaw[id]);
-    p.status = "FINISHED";
+    p.status = "finished"; // lowercase for Redis
     p.finishedAt = new Date().toISOString();
     await redis.hset(keys.lobby, id, JSON.stringify(p));
   }
@@ -1010,7 +1067,7 @@ export const endRound0 = async(io) =>{
 
   await prisma.round.update({
     where: { roundNumber: 0 },
-    data: { status: "COMPLETED" },
+    data: { status: "COMPLETED" }, // UPPERCASE for database
   });
  
   io.to('round0').emit('round0:ended', { message: 'Round 0 has ended!' });
@@ -1045,7 +1102,7 @@ export const round0AdminAddUser = async (io, userId) => {
       return;
     }
 
-    if (roundDB.status === "COMPLETED") {
+    if (roundDB.status === "COMPLETED") { // UPPERCASE check
       io.emit("admin:error", { error: "Round already ended" });
       return;
     }
@@ -1060,8 +1117,8 @@ export const round0AdminAddUser = async (io, userId) => {
       userId,
       username: user.username,
       email: userId,
-      role: user.role || 'USER',
-      status: roundDB.status === 'IN_PROGRESS' ? 'IN_MATCH' : 'WAITING',
+      role: user.role || 'PLAYER',
+      status: roundDB.status === 'IN_PROGRESS' ? 'in_match' : 'lobby', // UPPERCASE check, lowercase value for Redis
       joinedAt: new Date().toISOString(),
       isReady: false
     };
