@@ -9,7 +9,7 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
  */
 
 const ROUND_DURATION = 60 * 60; // 60 minutes in seconds
-const HACKING_PHASE_START_SECONDS = 0.5 * 60; // Hacking starts with 30 seconds left
+const HACKING_PHASE_START_SECONDS = 0.99 * 60; // Hacking starts with 30 seconds left
 const ROUND_NUMBER = 3;
 
 // In-memory state for quick server access
@@ -431,7 +431,7 @@ export const emitHackResult = (io, result) => {
 };
 
 // Admin functions
-export const round3AdminAddUser = async (io, userId) => {
+export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
   try {
     if (!userId) {
       io.emit("admin:error", { error: "Invalid user email" });
@@ -460,6 +460,12 @@ export const round3AdminAddUser = async (io, userId) => {
 
     if (roundDB.status === "COMPLETED") {
       io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    // Only check IN_PROGRESS status if not forcing the add
+    if (!forceAdd && roundDB.status === "IN_PROGRESS") {
+      io.emit("admin:error", { error: "Round is in progress" });
       return;
     }
 

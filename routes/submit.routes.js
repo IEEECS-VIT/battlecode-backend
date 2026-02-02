@@ -158,6 +158,7 @@ router.post("/run", async (req, res) => {
  */
 router.post("/submit", verifyAuthToken, async (req, res) => {
   try {
+    console.log("🔵 [SUBMIT] New submission request received");
 
     const io = req.app.get("io");
 
@@ -167,7 +168,17 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     const { language, source_code, problemId, roundNumber, context } = req.body;
     const userId = req.user?.email;
 
+    console.log("📊 [SUBMIT] Request details:", {
+      userId,
+      problemId,
+      roundNumber,
+      language,
+      codeLength: source_code?.length,
+      context
+    });
+
     if (!userId) {
+      console.log("❌ [SUBMIT] Unauthorized - No userId found");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -175,12 +186,21 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
     if (!user) {
+      console.log("❌ [SUBMIT] User not found in database:", userId);
       return res.status(404).json({
         error: "Authenticated user not found. Please log out and log in again.",
       });
     }
 
+    console.log("✅ [SUBMIT] User validated:", user.username);
+
     if (!language || !source_code || !problemId || roundNumber === undefined) {
+      console.log("❌ [SUBMIT] Missing required fields:", {
+        hasLanguage: !!language,
+        hasSourceCode: !!source_code,
+        hasProblemId: !!problemId,
+        hasRoundNumber: roundNumber !== undefined
+      });
       return res.status(400).json({
         error:
           "Missing required fields: language, source_code, problemId, roundNumber",
@@ -189,10 +209,13 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     const language_id = LANGUAGE_ID_MAP[language.toLowerCase()];
     if (!language_id) {
+      console.log("❌ [SUBMIT] Unsupported language:", language);
       return res
         .status(400)
         .json({ error: `Unsupported language: ${language}` });
     }
+
+    console.log("✅ [SUBMIT] Language validated:", language, "->", language_id);
 
     const problem = await prisma.problem.findUnique({
       where: { id: problemId },
@@ -206,10 +229,19 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     });
 
     if (!problem) {
+      console.log("❌ [SUBMIT] Problem not found:", problemId);
       return res.status(404).json({ error: "Problem not found" });
     }
 
+    console.log("✅ [SUBMIT] Problem found:", {
+      title: problem.title,
+      difficulty: problem.difficulty,
+      roundId: problem.roundId,
+      requestedRound: roundNumber
+    });
+
     if (problem.roundId !== roundNumber) {
+      console.log("❌ [SUBMIT] Round mismatch - Problem belongs to round", problem.roundId, "but submission is for round", roundNumber);
       return res
         .status(400)
         .json({ error: "Problem does not belong to specified round" });
@@ -223,7 +255,14 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       : problem.hiddenTestCases.testCases || [];
     const allTestCases = [...sampleTestCases, ...hiddenTestCases];
 
+    console.log("📝 [SUBMIT] Test cases:", {
+      sampleCount: sampleTestCases.length,
+      hiddenCount: hiddenTestCases.length,
+      totalCount: allTestCases.length
+    });
+
     if (allTestCases.length === 0) {
+      console.log("❌ [SUBMIT] No test cases found for problem");
       return res.status(400).json({ error: "No test cases found" });
     }
 
@@ -239,11 +278,16 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       expected_output: testCase.expected_output || testCase.output || "",
       index: idx,
     }));
+    
+    console.log("🔄 [SUBMIT] Sending to Judge0:", JUDGE0_API_URL);
+    
     const submissionResponse = await axios.post(
       `${JUDGE0_API_URL}/submissions/batch`,
       { submissions },
       axiosConfig
     );
+
+    console.log("✅ [SUBMIT] Judge0 batch submission created, tokens received:", submissionResponse.data?.length);
 
     const tokens = submissionResponse.data.map((item) => item.token);
     let results = [];
@@ -289,8 +333,16 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       return res.status(408).json({ error: "Submission execution timed out" });
     }
 
+    console.log("✅ [SUBMIT] All Judge0 results received");
+
     const passedCount = results.filter((r) => r.passed).length;
     const totalCount = allTestCases.length;
+
+    console.log("📊 [SUBMIT] Test results:", {
+      passed: passedCount,
+      total: totalCount,
+      percentage: ((passedCount / totalCount) * 100).toFixed(2) + "%"
+    });
 
     let submissionStatus;
     if (results.some((r) => r.compile_output))
@@ -310,8 +362,10 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     let calculatedScore = 0;
     if (roundNumber === 0) {
       calculatedScore = ScoreRound0(totalCount, passedCount, executionCount);
+      console.log("💯 [SUBMIT] Round 0 score calculated:", calculatedScore);
     } else if (roundNumber === 3) {
       calculatedScore = ScoreRound3(totalCount, passedCount, executionCount);
+      console.log("💯 [SUBMIT] Round 3 score calculated:", calculatedScore);
     } else if (roundNumber === 1) {
       const keys = getRound1RedisKeys();
       const allMatchesStr = await redis.hgetall(keys.matches);
@@ -467,7 +521,16 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         where: { id: userId },
         data: { eventScore: { increment: scoreImprovement } },
       });
+      console.log("✅ [SUBMIT] User score updated. Improvement:", scoreImprovement);
+    } else {
+      console.log("ℹ️ [SUBMIT] No score improvement. Current score:", calculatedScore, "Previous best:", existingSubmission?.score || 0);
     }
+
+    console.log("🎉 [SUBMIT] Submission completed successfully:", {
+      submissionId: finalSubmission.id,
+      status: finalSubmission.status,
+      score: finalSubmission.score
+    });
 
     res.status(200).json({
       success: true,
@@ -483,6 +546,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
     });
   } catch (error) {
     console.error("💥 [SUBMIT] Error:", error.message, error.response?.data);
+    console.error("💥 [SUBMIT] Stack trace:", error.stack);
     res.status(500).json({
       error: "Failed to submit code",
       details: error.response?.data || error.message,

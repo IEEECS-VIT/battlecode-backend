@@ -301,7 +301,7 @@ export const handleMatchForfeit = async (io, forfeitingUserId) => {
 
 //ADMIN HANDLERS FOR ROUND 1
 
-export const round1AdminAddUser = async (io, userId) => {
+export const round1AdminAddUser = async (io, userId, forceAdd = false) => {
   try {
     if (!userId) {
       io.emit("admin:error", { error: "Invalid user email" });
@@ -325,13 +325,18 @@ export const round1AdminAddUser = async (io, userId) => {
       return;
     }
 
+    // Only check "running" status if not forcing the add
+    const roundStatus = await redis.get(keys.status);
+    if (!forceAdd && roundStatus === "running") {
+      io.emit("admin:error", { error: "Round is in progress" });
+      return;
+    }
+
     const existing = await redis.hget(keys.participants, userId);
     if (existing) {
       io.to(`user:${userId}`).emit("round1:adminAdded");
       return;
     }
-
-    const roundStatus = await redis.get(keys.status);
 
     const participant = {
       id: userId,

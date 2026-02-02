@@ -789,7 +789,7 @@ const handleRound2Reset = async (payload, callback) => {
 };
 
 // Admin functions
-export const round2AdminAddUser = async (io, userId) => {
+export const round2AdminAddUser = async (io, userId, forceAdd = false) => {
   try {
     if (!userId) {
       io.emit("admin:error", { error: "Invalid user email" });
@@ -818,6 +818,12 @@ export const round2AdminAddUser = async (io, userId) => {
 
     if (roundDB.status === "COMPLETED") {
       io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    // Only check IN_PROGRESS status if not forcing the add
+    if (!forceAdd && roundDB.status === "IN_PROGRESS") {
+      io.emit("admin:error", { error: "Round is in progress" });
       return;
     }
 

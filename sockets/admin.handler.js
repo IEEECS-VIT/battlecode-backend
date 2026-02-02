@@ -53,6 +53,20 @@ export const adminHandler = (io, socket) => {
 
       console.log(`Admin ${socket.user.id} updated round ${roundNumber} status to ${status}`);
 
+      // If status is changing to LOBBY, ensure admin joins the round room
+      if (status === 'LOBBY') {
+        const roomName = roundNumber === 2 ? 'round2_lobby' : `round${roundNumber}`;
+        socket.join(roomName);
+        console.log(`Admin ${socket.user.id} joined room ${roomName} for lobby state`);
+      }
+
+      // If status is ending (COMPLETED), leave the round room
+      if (status === 'COMPLETED') {
+        const roomName = roundNumber === 2 ? 'round2_lobby' : `round${roundNumber}`;
+        socket.leave(roomName);
+        console.log(`Admin ${socket.user.id} left room ${roomName} - round completed`);
+      }
+
       // Broadcast updated round info to all clients
       const currentRound = await getCurrentRound();
       io.emit("server:currentRound", currentRound);
@@ -86,16 +100,16 @@ export const adminHandler = (io, socket) => {
       
       switch (roundNumber) {
         case 0:
-          await round0AdminAddUser(io, userId);
+          await round0AdminAddUser(io, userId, true); // Pass true to bypass round status check
           return callback?.({ success: true, message: `User added to round ${roundNumber}` });
         case 1:
-          await round1AdminAddUser(io, userId);
+          await round1AdminAddUser(io, userId, true); // Pass true to bypass round status check
           return callback?.({ success: true, message: `User added to round ${roundNumber}` });
         case 2:
-          await round2AdminAddUser(io, userId);
+          await round2AdminAddUser(io, userId, true); // Pass true to bypass round status check
           return callback?.({ success: true, message: `User added to round ${roundNumber}` });
         case 3:
-          await round3AdminAddUser(io, userId);
+          await round3AdminAddUser(io, userId, true); // Pass true to bypass round status check
           return callback?.({ success: true, message: `User added to round ${roundNumber}` });
         default:
           console.warn(`[ADMIN] Invalid round ${roundNumber} for adduser`);

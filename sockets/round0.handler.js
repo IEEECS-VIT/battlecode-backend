@@ -1075,7 +1075,7 @@ export const endRound0 = async(io) =>{
   await broadcastLobbyUpdate(io);
 }
 
-export const round0AdminAddUser = async (io, userId) => {
+export const round0AdminAddUser = async (io, userId, forceAdd = false) => {
   try {
     if (!userId) {
       io.emit("admin:error", { error: "Invalid user email" });
@@ -1104,6 +1104,12 @@ export const round0AdminAddUser = async (io, userId) => {
 
     if (roundDB.status === "COMPLETED") { // UPPERCASE check
       io.emit("admin:error", { error: "Round already ended" });
+      return;
+    }
+
+    // Only check IN_PROGRESS status if not forcing the add
+    if (!forceAdd && roundDB.status === "IN_PROGRESS") {
+      io.emit("admin:error", { error: "Round is in progress" });
       return;
     }
 
