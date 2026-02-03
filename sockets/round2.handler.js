@@ -275,13 +275,17 @@ export const round2Handler = (io, socket) => {
   matchEndHandler = handleMatchEnd;
   bountyEndHandler = handleBountyEnd;
 
-  const handleLobbyJoin = async (callback) => {
+  const handleLobbyJoin = async (payload, callback) => {
     try {
       const userId = socket.user?.email;
-      if (!userId) return callback?.({ success: false, message: "Authentication error." });
+      if (!userId) {
+        console.error("[R2] Join failed: No userId");
+        return callback?.({ success: false, message: "Authentication error." });
+      }
 
       const round2Status = await prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true }});
       if (round2Status?.status !== 'LOBBY') {
+          console.error(`[R2] Join failed: Round status is ${round2Status?.status}`);
           return callback?.({ success: false, message: `Round 2 is not in lobby phase. Current status: ${round2Status?.status}` });
       }
 
@@ -299,15 +303,18 @@ export const round2Handler = (io, socket) => {
       await broadcastLobbyUpdate();
       callback?.({ success: true, message: "Joined lobby successfully." });
     } catch (err) {
-      console.error("Error in handleLobbyJoin:", err);
+      console.error("[R2] Error in handleLobbyJoin:", err);
       callback?.({ success: false, message: "Server error during join." });
     }
   };
 
-  const handleStart = async (callback) => {
+  const handleStart = async (payload, callback) => {
     try {
       const adminUser = await prisma.user.findUnique({ where: {id: socket.user?.email }});
-      if (adminUser?.role !== 'ADMIN') return callback({ success: false, message: "Not authorized." });
+      if (adminUser?.role !== 'ADMIN') {
+        console.error("[R2] Start failed: Not authorized");
+        return callback({ success: false, message: "Not authorized." });
+      }
 
       await prisma.round.update({ where: { roundNumber: 2 }, data: { status: 'IN_PROGRESS' } });
 
@@ -335,21 +342,23 @@ export const round2Handler = (io, socket) => {
       await broadcastLobbyUpdate();
       callback({ success: true });
     } catch (err) {
-      console.error("Error in handleStart:", err);
+      console.error("[R2] Error in handleStart:", err);
       callback({ success: false, message: "Server error." });
     }
   };
 
-  const handleGetState = async () => {
+  const handleGetState = async (payload, callback) => {
      try {
       const userId = socket.user?.email;
       if (!userId) {
-      socket.emit("round2:state:error", {
-        success: false,
-        message: "Authentication error.",
-      });
-      return;
-    }
+        console.error("[R2] Get state failed: No userId");
+        socket.emit("round2:state", {
+          success: false,
+          message: "Authentication error.",
+        });
+        return;
+      }
+      
       const [roundStarted, endTimeStr, participantStr, userMatchId, activeBountyKey] = await Promise.all([
         redis.get(keys.roundStarted),
         redis.get(keys.roundEndTime),
@@ -376,17 +385,23 @@ export const round2Handler = (io, socket) => {
         activeSession: activeSession
       };
 
-      callback?.({ success: true, state });
+      socket.emit("round2:state", { success: true, state });
     } catch (err) {
-      console.error("Error in handleGetState:", err);
-  
+      console.error("[R2] Error in handleGetState:", err);
+      socket.emit("round2:state", {
+        success: false,
+        message: "Server error fetching state."
+      });
     }
   };
 
-  const handleGetDashboardState = async (callback) => {
+  const handleGetDashboardState = async (payload, callback) => {
     try {
         const userId = socket.user?.email;
-        if (!userId) return callback?.({ success: false, message: "Authentication error." });
+        if (!userId) {
+          console.error("[R2] Get dashboard failed: No userId");
+          return callback?.({ success: false, message: "Authentication error." });
+        }
 
         const [
             participantsData,
@@ -437,7 +452,7 @@ export const round2Handler = (io, socket) => {
         const roundEndTime = endTimeStr ? parseInt(endTimeStr) : null;
         callback?.({ success: true, dashboard: { allParticipants: participants, bountyQuestions: bountyQuestionsWithStatus, incomingRequests, roundEndTime } });
     } catch (err) {
-        console.error("Error in handleGetDashboardState:", err);
+        console.error("[R2] Error in handleGetDashboardState:", err);
         callback?.({ success: false, message: "Server error fetching dashboard state." });
     }
   };
@@ -449,6 +464,7 @@ export const round2Handler = (io, socket) => {
 
       const isAlreadyAttempted = await redis.sismember(keys.attemptedBounties(userId), questionId);
       if (isAlreadyAttempted) {
+          console.error(`[R2] Bounty begin failed: Question ${questionId} already attempted by ${userId}`);
           return callback({ success: false, message: "You have already attempted this bounty question." });
       }
 
@@ -480,7 +496,7 @@ export const round2Handler = (io, socket) => {
       callback({ success: true, questionId, startTime: sessionStartTime, endTime: sessionEndTime });
       await broadcastDashboardUpdates();
     } catch (err) {
-      console.error("Error in handleBountyBeginQuestion:", err);
+      console.error("[R2] Error in handleBountyBeginQuestion:", err);
       callback({ success: false, message: "Could not start bounty." });
     }
   };
@@ -523,7 +539,7 @@ export const round2Handler = (io, socket) => {
         callback?.({ success: true, message: "Challenge request sent." });
         await broadcastDashboardUpdates();
     } catch (err) {
-        console.error("Error in handleChallengeRequest:", err);
+        console.error("[R2] Error in handleChallengeRequest:", err);
         callback({ success: false, message: "Server error" });
     }
   };
@@ -583,7 +599,7 @@ const question = questions[Math.floor(Math.random() * questions.length)];
         callback?.({ success: true, matchId });
         await broadcastDashboardUpdates();
     } catch (err) {
-        console.error("Error in handleChallengeAccept:", err);
+        console.error("[R2] Error in handleChallengeAccept:", err);
         callback?.({ success: false, message: "Server error." });
     }
   };
@@ -608,7 +624,7 @@ const question = questions[Math.floor(Math.random() * questions.length)];
         callback?.({ success: true, message: "Challenge rejected." });
         await broadcastDashboardUpdates();
     } catch (err) {
-        console.error("Error in handleChallengeReject:", err);
+        console.error("[R2] Error in handleChallengeReject:", err);
         callback?.({ success: false, message: "Server error." });
     }
   };
@@ -637,7 +653,7 @@ const question = questions[Math.floor(Math.random() * questions.length)];
             callback({ success: false, message: "Invalid session type." });
         }
       } catch(err) {
-          console.error("Error in getCodePageState:", err);
+          console.error("[R2] Error in getCodePageState:", err);
           callback({ success: false, message: "Server error getting session." });
       }
   };
