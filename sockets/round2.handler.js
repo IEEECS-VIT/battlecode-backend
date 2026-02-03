@@ -100,7 +100,7 @@ const broadcastLobbyUpdate = async () => {
       redis.get(keys.roundStarted),
     ]);
     const participantsList = Object.values(participantsData).map(p => JSON.parse(p));
-    round2IO.to('round2_lobby').emit("round2:lobbyUpdate", {
+    round2IO.to('round2_lobby').emit("round2:lobby", {
       participants: participantsList,
       isRoundActive: !!isRoundActive,
     });
@@ -354,7 +354,9 @@ export const round2Handler = (io, socket) => {
         console.error("[R2] Get state failed: No userId");
         socket.emit("round2:state", {
           success: false,
-          message: "Authentication error.",
+          error: "Authentication error.",
+          timestamp: Date.now(),
+          roundNumber: 2
         });
         return;
       }
@@ -367,7 +369,8 @@ export const round2Handler = (io, socket) => {
         userMatchId,
         activeBountyKey,
         elites,
-        challengers
+        challengers,
+        roundStatus
       ] = await Promise.all([
         redis.get(keys.roundStarted),
         redis.get(keys.roundEndTime),
@@ -376,37 +379,82 @@ export const round2Handler = (io, socket) => {
         redis.get(keys.userMatch(userId)),
         redis.get(keys.activeBounty(userId)),
         redis.smembers(keys.elites),
-        redis.smembers(keys.challengers)
+        redis.smembers(keys.challengers),
+        prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true } })
       ]);
 
       const participant = participantStr ? JSON.parse(participantStr) : null;
-      const participants = Object.values(participantsData || {}).map(p => JSON.parse(p));
+      const allParticipants = Object.values(participantsData || {}).map(p => JSON.parse(p));
 
-      let activeSession = null;
-      if (userMatchId) {
-        activeSession = { type: 'match', contextId: userMatchId };
-      } else if (activeBountyKey) {
-        const keyParts = activeBountyKey.split(':');
-        const questionId = keyParts[keyParts.length - 1];
-        activeSession = { type: 'bounty', contextId: questionId };
+      // Determine round status
+      const isActive = !!roundStarted;
+      let status = 'LOBBY';
+      if (roundStatus?.status) {
+        status = roundStatus.status; // LOCKED, LOBBY, IN_PROGRESS, or COMPLETED
+      } else if (isActive) {
+        status = 'IN_PROGRESS';
       }
 
-      const state = {
-        roundIsActive: !!roundStarted,
-        roundEndTime: endTimeStr ? parseInt(endTimeStr) : null,
-        userRole: participant?.role || null,
-        activeSession,
-        participants,
-        elites: Array.from(elites),
-        challengers: Array.from(challengers)
+      // Calculate time remaining
+      const endTime = endTimeStr ? parseInt(endTimeStr) : null;
+      const timeRemaining = endTime ? Math.max(0, endTime - Date.now()) : 0;
+
+      // Categorize participants by status
+      const byStatus = {
+        lobby: [],
+        waiting: [],
+        in_match: [],
+        finished: [],
+        disconnected: [],
+        cooldown: []
       };
 
-      socket.emit("round2:state", { success: true, state });
+      for (const p of allParticipants) {
+        const statusKey = p.status ? p.status.toLowerCase() : 'lobby';
+        
+        if (statusKey.includes('idle')) {
+          byStatus.waiting.push(p);
+        } else if (statusKey.includes('match') || statusKey.includes('bounty')) {
+          byStatus.in_match.push(p);
+        } else if (statusKey.includes('cooldown')) {
+          byStatus.cooldown.push(p);
+        } else if (statusKey.includes('finished') || statusKey.includes('completed')) {
+          byStatus.finished.push(p);
+        } else if (statusKey.includes('disconnected')) {
+          byStatus.disconnected.push(p);
+        } else {
+          byStatus.lobby.push(p);
+        }
+      }
+
+      // Build optimal response format
+      const response = {
+        success: true,
+        timestamp: Date.now(),
+        roundNumber: 2,
+        round: {
+          isActive,
+          status,
+          endTime,
+          timeRemaining,
+          nextMatchmakingCycle: null // Can be calculated based on your matchmaking logic
+        },
+        participants: {
+          total: allParticipants.length,
+          byStatus,
+          all: allParticipants // Include for leaderboard functionality
+        },
+        currentUser: participant
+      };
+
+      socket.emit("round2:state", response);
     } catch (err) {
       console.error("[R2] Error in handleGetState:", err);
       socket.emit("round2:state", {
         success: false,
-        message: "Server error fetching state."
+        error: "Server error fetching state.",
+        timestamp: Date.now(),
+        roundNumber: 2
       });
     }
   };
@@ -807,7 +855,7 @@ const handleRound2Reset = async (payload, callback) => {
 
 
   socket.on("round2:join", handleLobbyJoin);
-  socket.on("round2:start", handleStart);
+  socket.on("round2:ready", handleStart);
   socket.on("round2:getState", handleGetState);
   socket.on("disconnect", handleDisconnect);
   socket.on("round2:getDashboardState", handleGetDashboardState);
@@ -930,6 +978,97 @@ export const round2AdminRemoveUser = async (io, userId) => {
   } catch (err) {
     console.error("[Admin Remove User R2]", err);
     io.emit("admin:error", { error: "Failed to remove user" });
+  }
+};
+
+export const endRound2 = async (io, forceEnd = false) => {
+  const keys = getRedisKeys();
+
+  console.log("--- ENDING ROUND 2 ---");
+
+  try {
+    // Stop intervals
+    if (lobbyUpdateInterval) {
+      clearInterval(lobbyUpdateInterval);
+      lobbyUpdateInterval = null;
+      console.log("✅ Lobby update interval cleared");
+    }
+    if (dashboardUpdateInterval) {
+      clearInterval(dashboardUpdateInterval);
+      dashboardUpdateInterval = null;
+      console.log("✅ Dashboard update interval cleared");
+    }
+
+    // Clear all request timeouts
+    for (const [key, timeoutId] of requestTimeouts.entries()) {
+      clearTimeout(timeoutId);
+      requestTimeouts.delete(key);
+    }
+    console.log("✅ All request timeouts cleared");
+
+    // Clear disconnect timeouts
+    for (const [userId, timeoutId] of disconnectTimeouts.entries()) {
+      clearTimeout(timeoutId);
+      disconnectTimeouts.delete(userId);
+    }
+    console.log("✅ All disconnect timeouts cleared");
+
+    // End all active matches
+    const matchKeys = await redis.keys("round2:match:*");
+    for (const matchKey of matchKeys) {
+      const matchDataStr = await redis.get(matchKey);
+      if (matchDataStr) {
+        const matchData = JSON.parse(matchDataStr);
+        const matchId = matchKey.replace("round2:match:", "");
+        
+        // Notify players that match ended due to round end
+        io.to(`match:${matchId}`).emit("round2:matchEnd", {
+          winner: null,
+          reason: forceEnd ? "admin_force_end" : "round_ended"
+        });
+        
+        console.log(`✅ Ended match ${matchId}`);
+      }
+    }
+
+    // Reset all participants to lobby status
+    const participantsData = await redis.hgetall(keys.participants);
+    for (const userId in participantsData) {
+      const participant = JSON.parse(participantsData[userId]);
+      participant.status = "lobby";
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+      
+      // Clear user-specific data
+      await redis.del(
+        keys.cooldown(userId),
+        keys.activeBounty(userId),
+        keys.userMatch(userId),
+        keys.rejectCount(userId)
+      );
+      
+      io.to(`user:${userId}`).emit("round2:ended");
+    }
+    console.log("✅ All participants reset to lobby");
+
+    // Update round status in Redis and database
+    await redis.set(keys.roundStarted, "false");
+    await redis.del(keys.roundEndTime);
+    await prisma.round.update({
+      where: { roundNumber: 2 },
+      data: { status: "COMPLETED" }
+    });
+    console.log("✅ Round 2 status updated to COMPLETED");
+
+    // Broadcast round ended to all clients
+    io.emit("round2:ended");
+
+    // Broadcast final lobby update
+    await broadcastLobbyUpdate();
+
+    console.log("✅ Round 2 ended successfully");
+  } catch (error) {
+    console.error("❌ Error ending Round 2:", error);
+    throw error;
   }
 };
 
