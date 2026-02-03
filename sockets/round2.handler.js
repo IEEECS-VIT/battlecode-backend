@@ -359,15 +359,28 @@ export const round2Handler = (io, socket) => {
         return;
       }
       
-      const [roundStarted, endTimeStr, participantStr, userMatchId, activeBountyKey] = await Promise.all([
+      const [
+        roundStarted,
+        endTimeStr,
+        participantsData,
+        participantStr,
+        userMatchId,
+        activeBountyKey,
+        elites,
+        challengers
+      ] = await Promise.all([
         redis.get(keys.roundStarted),
         redis.get(keys.roundEndTime),
+        redis.hgetall(keys.participants),
         redis.hget(keys.participants, userId),
         redis.get(keys.userMatch(userId)),
-        redis.get(keys.activeBounty(userId))
+        redis.get(keys.activeBounty(userId)),
+        redis.smembers(keys.elites),
+        redis.smembers(keys.challengers)
       ]);
 
       const participant = participantStr ? JSON.parse(participantStr) : null;
+      const participants = Object.values(participantsData || {}).map(p => JSON.parse(p));
 
       let activeSession = null;
       if (userMatchId) {
@@ -382,7 +395,10 @@ export const round2Handler = (io, socket) => {
         roundIsActive: !!roundStarted,
         roundEndTime: endTimeStr ? parseInt(endTimeStr) : null,
         userRole: participant?.role || null,
-        activeSession: activeSession
+        activeSession,
+        participants,
+        elites: Array.from(elites),
+        challengers: Array.from(challengers)
       };
 
       socket.emit("round2:state", { success: true, state });
