@@ -9,7 +9,10 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
  */
 
 const ROUND_DURATION = 60 * 60; // 60 minutes in seconds
-const HACKING_PHASE_START_SECONDS = 0.99 * 60; // Hacking starts with 30 seconds left
+// Hacking starts X seconds AFTER round start
+const HACKING_PHASE_START_AFTER_SECONDS = 30; // now
+// later: 30 * 60
+
 const ROUND_NUMBER = 3;
 
 // In-memory state for quick server access
@@ -96,14 +99,19 @@ export const round3Handler = (io, socket) => {
         const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
         const timeRemaining = ROUND_DURATION - elapsed;
 
-        if (timeRemaining <= HACKING_PHASE_START_SECONDS && !globalRoundState.isHackingPhase) {
-          globalRoundState.isHackingPhase = true;
-          console.log('[ROUND 3] Hacking phase has started!');
-          io.to(`round${ROUND_NUMBER}`).emit('round3:hackingPhaseStart', {
-            message: 'Hacking phase has begun!',
-            timeRemaining
-          });
-        }
+          if (
+              elapsed >= HACKING_PHASE_START_AFTER_SECONDS &&
+              !globalRoundState.isHackingPhase
+            ) {
+              globalRoundState.isHackingPhase = true;
+
+              console.log('[ROUND 3] Hacking phase has started!');
+              io.to(`round${ROUND_NUMBER}`).emit('round3:hackingPhaseStart', {
+                message: 'Hacking phase has begun!',
+                elapsed,
+              });
+            }
+
         
         if (timeRemaining <= 0) {
           clearInterval(globalRoundState.timerInterval);
@@ -135,7 +143,7 @@ export const round3Handler = (io, socket) => {
             globalRoundState.isActive = true;
             globalRoundState.startTime = startTime;
             globalRoundState.problems = JSON.parse(problemsRaw);
-            globalRoundState.isHackingPhase = (ROUND_DURATION - elapsed) <= HACKING_PHASE_START_SECONDS;
+            globalRoundState.isHackingPhase =elapsed >= HACKING_PHASE_START_AFTER_SECONDS;
             startGlobalTimer(io);
             console.log('[ROUND 3] Synced active round state from Redis.');
           } else {
