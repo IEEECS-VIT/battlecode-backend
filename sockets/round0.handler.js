@@ -848,7 +848,33 @@ export const round0Handler = (io, socket) => {
     try {
       const validation = validateUser();
       if (validation.error) {
-        socket.emit('round0:state', { success: false, error: validation.error });
+        socket.emit('round0:state', { 
+          success: false, 
+          error: validation.error,
+          timestamp: Date.now(),
+          roundNumber: 0,
+          round: {
+            isActive: false,
+            status: 'LOBBY',
+            startTime: null,
+            endTime: null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: 0,
+            byStatus: {
+              lobby: [],
+              waiting: [],
+              in_match: [],
+              cooldown: [],
+              finished: [],
+              disconnected: []
+            },
+            all: []
+          },
+          currentUser: null
+        });
         return;
       }
       const { userId } = validation;
@@ -863,7 +889,33 @@ export const round0Handler = (io, socket) => {
       });
 
       if (!round0DB) {
-        socket.emit('round0:state', { success: false, error: 'Round 0 not found in database' });
+        socket.emit('round0:state', { 
+          success: false, 
+          error: 'Round 0 not found in database',
+          timestamp: Date.now(),
+          roundNumber: 0,
+          round: {
+            isActive: false,
+            status: 'LOBBY',
+            startTime: null,
+            endTime: null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: 0,
+            byStatus: {
+              lobby: [],
+              waiting: [],
+              in_match: [],
+              cooldown: [],
+              finished: [],
+              disconnected: []
+            },
+            all: []
+          },
+          currentUser: null
+        });
         return;
       }
 
@@ -880,46 +932,56 @@ export const round0Handler = (io, socket) => {
       // Find current user's participant data
       const participant = allParticipants.find(p => p.userId === userId) || null;
 
+      // Calculate timeRemaining
+      let timeRemaining = 0;
+      if (globalRoundState.isActive && globalRoundState.startTime) {
+        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      }
+
+      // Group participants by status
+      const byStatus = {
+        lobby: allParticipants.filter(p => (p.status || 'lobby').toLowerCase() === 'lobby' || (p.status || 'lobby').toLowerCase() === 'ready'),
+        waiting: allParticipants.filter(p => (p.status || '').toLowerCase() === 'waiting' || (p.status || '').toLowerCase() === 'in_queue'),
+        in_match: allParticipants.filter(p => (p.status || '').toLowerCase() === 'in_match' || (p.status || '').toLowerCase() === 'playing'),
+        cooldown: allParticipants.filter(p => (p.status || '').toLowerCase() === 'cooldown'),
+        finished: allParticipants.filter(p => (p.status || '').toLowerCase() === 'finished' || (p.status || '').toLowerCase() === 'completed'),
+        disconnected: allParticipants.filter(p => (p.status || '').toLowerCase() === 'disconnected')
+      };
+
+      // Sync in-memory state with database if needed (DO THIS BEFORE OTHER CHECKS)
+      if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') { // UPPERCASE check
+        console.log('Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
+        await syncGlobalStateWithRedis();
+        
+        // Recalculate timeRemaining after sync
+        if (globalRoundState.isActive && globalRoundState.startTime) {
+          const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+          timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+        }
+      }
+
       // If round is not active or user not in lobby, return lobby-only state
       if (round0DB.status !== 'IN_PROGRESS' || !participant) { // UPPERCASE check
         socket.emit('round0:state', {
           success: true,
-          isActive: false,
-          participant,
-          allParticipants,
-          totalParticipants: allParticipants.length,
-          currentProblem: null,
-          problemIndex: null,
-          problems: null,
-          totalProblems: null,
-          timeRemaining: 0,
-          progress: null,
-          startTime: null,
-          databaseStatus: round0DB.status, // Return UPPERCASE status
-          message: round0DB.status === 'LOBBY' ? 'Round not started yet' : 'Round ended' // UPPERCASE check
-        });
-        return;
-      }
-
-      // Sync in-memory state with database if needed
-      if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') { // UPPERCASE check
-        console.log('Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
-        await syncGlobalStateWithRedis();
-      }
-
-      if (!globalRoundState.isActive) {
-        socket.emit('round0:state', { 
-          success: false, 
-          error: 'Round 0 is not active',
-          allParticipants,
-          totalParticipants: allParticipants.length,
-          currentProblem: null,
-          problemIndex: null,
-          problems: null,
-          totalProblems: null,
-          timeRemaining: 0,
-          progress: null,
-          startTime: null
+          timestamp: Date.now(),
+          roundNumber: 0,
+          round: {
+            isActive: false,
+            status: round0DB.status,
+            startTime: globalRoundState.startTime,
+            endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: allParticipants.length,
+            byStatus,
+            all: allParticipants
+          },
+          currentUser: participant,
+          message: round0DB.status === 'LOBBY' ? 'Round not started yet' : 'Round ended'
         });
         return;
       }
@@ -931,17 +993,22 @@ export const round0Handler = (io, socket) => {
         // User is in lobby but doesn't have match state yet
         socket.emit('round0:state', {
           success: true,
-          isActive: true,
-          participant,
-          allParticipants,
-          totalParticipants: allParticipants.length,
-          currentProblem: null,
-          problemIndex: null,
-          problems: null,
-          totalProblems: null,
-          timeRemaining: 0,
-          progress: null,
-          startTime: null,
+          timestamp: Date.now(),
+          roundNumber: 0,
+          round: {
+            isActive: true,
+            status: 'IN_PROGRESS',
+            startTime: globalRoundState.startTime,
+            endTime: globalRoundState.startTime + (ROUND_DURATION * 1000),
+            timeRemaining,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: allParticipants.length,
+            byStatus,
+            all: allParticipants
+          },
+          currentUser: participant,
           message: 'Waiting in lobby'
         });
         return;
@@ -950,31 +1017,82 @@ export const round0Handler = (io, socket) => {
       // User has active match state
       const userState = JSON.parse(userStateRaw);
       const userProgressRaw = await redis.get(keys.progress);
-      const userProgress = userProgressRaw ? JSON.parse(userProgressRaw) : {};
+      const userProgress = userProgressRaw ? JSON.parse(userProgressRaw) : {
+        problemsSolved: 0,
+        currentProblem: userState.currentProblemIndex,
+        score: 0,
+        lastActivity: new Date().toISOString()
+      };
 
-      const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-      const timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      // Recalculate timeRemaining for user with active state
+      const elapsedTime = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+      timeRemaining = Math.max(ROUND_DURATION - elapsedTime, 0);
 
       // Return full match state
       socket.emit('round0:state', {
         success: true,
-        isActive: true,
-        participant,
-        allParticipants,
-        totalParticipants: allParticipants.length,
-        currentProblem: userState.problems[userState.currentProblemIndex],
-        problemIndex: userState.currentProblemIndex,
-        problems: userState.problems,
-        totalProblems: userState.problems.length,
-        timeRemaining,
-        progress: userProgress,
-        startTime: globalRoundState.startTime,
+        timestamp: Date.now(),
+        roundNumber: 0,
+        round: {
+          isActive: true,
+          status: 'IN_PROGRESS',
+          startTime: globalRoundState.startTime,
+          endTime: globalRoundState.startTime + (ROUND_DURATION * 1000),
+          timeRemaining,
+          duration: ROUND_DURATION
+        },
+        participants: {
+          total: allParticipants.length,
+          byStatus,
+          all: allParticipants
+        },
+        currentUser: participant,
+        session: {
+          type: 'problem',
+          id: `round0-${userId}`,
+          startTime: globalRoundState.startTime,
+          endTime: globalRoundState.startTime + (ROUND_DURATION * 1000),
+          timeRemaining,
+          problem: userState.problems[userState.currentProblemIndex],
+          problems: userState.problems,
+          currentProblemIndex: userState.currentProblemIndex,
+          totalProblems: userState.problems.length
+        },
+        roundSpecific: {
+          progress: userProgress
+        },
         message: 'Current state retrieved successfully'
       });
 
     } catch (error) {
       console.error('Error in round0:getState:', error);
-      socket.emit('round0:state', { success: false, error: 'Failed to get current state' });
+      socket.emit('round0:state', { 
+        success: false, 
+        error: 'Failed to get current state',
+        timestamp: Date.now(),
+        roundNumber: 0,
+        round: {
+          isActive: false,
+          status: 'LOBBY',
+          startTime: null,
+          endTime: null,
+          timeRemaining: 0,
+          duration: ROUND_DURATION
+        },
+        participants: {
+          total: 0,
+          byStatus: {
+            lobby: [],
+            waiting: [],
+            in_match: [],
+            cooldown: [],
+            finished: [],
+            disconnected: []
+          },
+          all: []
+        },
+        currentUser: null
+      });
     }
   };
 
@@ -1130,9 +1248,54 @@ export const round0AdminAddUser = async (io, userId, forceAdd = false) => {
     };
 
     await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+
+    // If round is IN_PROGRESS, initialize user's game state
+    if (roundDB.status === 'IN_PROGRESS') {
+      // Sync global state if not active (e.g., server restart)
+      if (!globalRoundState.isActive) {
+        console.log(`Admin adding user during IN_PROGRESS but global state inactive. Syncing...`);
+        await syncGlobalStateWithRedis();
+      }
+
+      const lobbyKeys = getRedisKeys();
+      const problemsRaw = await redis.get(lobbyKeys.problems);
+      
+      if (problemsRaw && globalRoundState.startTime) {
+        const problems = JSON.parse(problemsRaw);
+        
+        // Initialize user state
+        const userState = {
+          currentProblemIndex: 0,
+          problems,
+          startTime: globalRoundState.startTime,
+          submissions: []
+        };
+        
+        await redis.setex(keys.state, 3600, JSON.stringify(userState));
+        
+        // Initialize progress
+        const userProgress = {
+          problemsSolved: 0,
+          currentProblem: 0,
+          score: 0,
+          lastActivity: new Date().toISOString()
+        };
+        
+        await redis.setex(keys.progress, 3600, JSON.stringify(userProgress));
+        
+        console.log(`Initialized game state for user ${userId} added during IN_PROGRESS`);
+      } else {
+        console.warn(`Cannot initialize game state for user ${userId}: problems=${!!problemsRaw}, startTime=${!!globalRoundState.startTime}`);
+      }
+    }
+
     await broadcastLobbyUpdate(io);
 
-    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
+    io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`, {
+      success: true,
+      message: 'You have been added to Round 0',
+      roundStatus: roundDB.status
+    });
     io.emit("admin:success", { action: "add", userId, round: ROUND_NUMBER });
 
   } catch (err) {
