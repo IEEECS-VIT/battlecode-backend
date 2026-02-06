@@ -57,18 +57,205 @@ const getEnrichedParticipantsList = async () => {
     return participantsList;
 };
 
+const transformToUnifiedState = async (userId, allParticipants, socket = null) => {
+    const keys = getRedisKeys();
+    const currentUser = allParticipants.find(p => p.id === userId) || null;
+    const currentStatus = await redis.get(keys.status);
+    const startTimeStr = await redis.get(keys.startTime);
+    const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
+
+    // Group participants by status
+    const byStatus = {
+        lobby: [],
+        waiting: [],
+        in_match: [],
+        cooldown: [],
+        finished: [],
+        disconnected: []
+    };
+
+    allParticipants.forEach(p => {
+        const status = p.status.replace('-', '_');
+        if (byStatus[status]) {
+            byStatus[status].push({
+                userId: p.id,
+                username: p.username,
+                email: p.id,
+                status: p.status,
+                rank: p.rank,
+                eventScore: p.eventScore,
+                socketId: p.socketId,
+                cooldownEndTime: p.cooldownEndTime
+            });
+        }
+    });
+
+    // Calculate time remaining
+    const globalTimeRemaining = roundStartTime 
+        ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) 
+        : 0;
+
+    // Base state
+    const unifiedState = {
+        success: true,
+        timestamp: Date.now(),
+        roundNumber: ROUND_NUMBER,
+        
+        round: {
+            isActive: currentStatus === "running",
+            status: currentStatus === "running" ? "IN_PROGRESS" : 
+                    currentStatus === "ended" ? "COMPLETED" : "LOBBY",
+            startTime: roundStartTime,
+            endTime: null,
+            timeRemaining: globalTimeRemaining,
+            duration: ROUND_DURATION
+        },
+        
+        participants: {
+            total: allParticipants.length,
+            byStatus,
+            all: allParticipants.map(p => ({
+                userId: p.id,
+                username: p.username,
+                email: p.id,
+                status: p.status,
+                rank: p.rank,
+                eventScore: p.eventScore,
+                socketId: p.socketId,
+                cooldownEndTime: p.cooldownEndTime
+            }))
+        },
+        
+        currentUser: currentUser ? {
+            userId: currentUser.id,
+            username: currentUser.username,
+            email: currentUser.id,
+            status: currentUser.status,
+            rank: currentUser.rank,
+            eventScore: currentUser.eventScore,
+            socketId: currentUser.socketId,
+            cooldownEndTime: currentUser.cooldownEndTime
+        } : null,
+        
+        roundSpecific: {
+            nextMatchmakingCycle: null,
+            globalTimeRemaining
+        }
+    };
+
+    // Add matchmaking cycle info
+    if (currentStatus === "running" && roundStartTime) {
+        const elapsed = Date.now() - roundStartTime;
+        const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
+        unifiedState.roundSpecific.nextMatchmakingCycle = 
+            Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
+    }
+
+    // Add session data if in match
+    if (currentUser?.status === 'in_match' && socket) {
+        const matches = await redis.hgetall(keys.matches);
+        for (const matchId in matches) {
+            const match = JSON.parse(matches[matchId]);
+            if (match.players.includes(userId)) {
+                socket.join(`match:${matchId}`);
+                
+                const question = await prisma.problem.findUnique({ 
+                    where: { id: match.problemId }
+                });
+                const opponentId = match.players.find(pId => pId !== userId);
+                const opponent = opponentId ? allParticipants.find(p => p.id === opponentId) : null;
+                
+                unifiedState.session = {
+                    type: 'match',
+                    id: matchId,
+                    startTime: match.startTime,
+                    endTime: match.startTime + match.duration,
+                    timeRemaining: Math.max(0, Math.floor((match.duration - (Date.now() - match.startTime)) / 1000)),
+                    opponent: opponent ? {
+                        id: opponent.id,
+                        username: opponent.username,
+                        rank: opponent.rank
+                    } : { id: opponentId, username: 'Unknown', rank: 'N/A' },
+                    problem: question
+                };
+                break;
+            }
+        }
+    }
+
+    return unifiedState;
+};
+
 
 const broadcastLobbyUpdate = async (io) => {
     try {
         const participantsList = await getEnrichedParticipantsList();
         const keys = getRedisKeys();
         const currentStatus = await redis.get(keys.status);
+        const startTimeStr = await redis.get(keys.startTime);
+        const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
 
-        io.emit('lobby:round1', {
-            participants: participantsList.filter(p => p.status === 'lobby'),
-            isActive: currentStatus === "running"
+        // Group participants by status
+        const byStatus = {
+            lobby: [],
+            waiting: [],
+            in_match: [],
+            cooldown: [],
+            finished: [],
+            disconnected: []
+        };
+
+        participantsList.forEach(p => {
+            const status = p.status.replace('-', '_');
+            if (byStatus[status]) {
+                byStatus[status].push({
+                    userId: p.id,
+                    username: p.username,
+                    email: p.id,
+                    status: p.status,
+                    rank: p.rank,
+                    eventScore: p.eventScore,
+                    socketId: p.socketId,
+                    cooldownEndTime: p.cooldownEndTime
+                });
+            }
         });
-        io.emit('round1:participantsUpdate', { participants: participantsList });
+
+        const globalTimeRemaining = roundStartTime 
+            ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) 
+            : 0;
+
+        const lobbyUpdate = {
+            success: true,
+            timestamp: Date.now(),
+            roundNumber: ROUND_NUMBER,
+            round: {
+                isActive: currentStatus === "running",
+                status: currentStatus === "running" ? "IN_PROGRESS" : 
+                        currentStatus === "ended" ? "COMPLETED" : "LOBBY",
+                startTime: roundStartTime,
+                endTime: null,
+                timeRemaining: globalTimeRemaining,
+                duration: ROUND_DURATION
+            },
+            participants: {
+                total: participantsList.length,
+                byStatus,
+                all: participantsList.map(p => ({
+                    userId: p.id,
+                    username: p.username,
+                    email: p.id,
+                    status: p.status,
+                    rank: p.rank,
+                    eventScore: p.eventScore,
+                    socketId: p.socketId,
+                    cooldownEndTime: p.cooldownEndTime
+                }))
+            }
+        };
+
+        io.emit('lobby:round1', lobbyUpdate);
+        io.emit('round1:participantsUpdate', lobbyUpdate);
     } catch (error) {
         console.error('[Broadcast Error]', error);
     }
@@ -172,8 +359,8 @@ export const round1RecoveryHandler = async (io, socket, userId) => {
       await broadcastLobbyUpdate(io);
     }
 
-    // In-match recovery
-    if (participant.status === 'in-match') {
+    // In_match recovery
+    if (participant.status === 'in_match') {
       const matches = await redis.hgetall(keys.matches);
 
       for (const matchId in matches) {
@@ -191,13 +378,17 @@ export const round1RecoveryHandler = async (io, socket, userId) => {
         const opponent = opponentStr ? JSON.parse(opponentStr) : null;
 
         socket.emit('round1:matchFound', {
-          question,
+          type: 'match',
+          id: matchId,
+          startTime: match.startTime,
+          endTime: match.startTime + match.duration,
+          timeRemaining: Math.max(0, Math.floor((match.duration - (Date.now() - match.startTime)) / 1000)),
           opponent: {
             id: opponentId,
+            username: opponent?.username ?? 'Unknown',
             rank: opponent?.rank ?? 'N/A'
           },
-          startTime: match.startTime,
-          duration: match.duration
+          problem: question
         });
 
         break;
@@ -377,7 +568,7 @@ export const round1AdminRemoveUser = async (io, userId) => {
     const participant = JSON.parse(participantStr);
 
     // 🔴 If user is in match → forfeit
-    if (participant.status === "in-match") {
+    if (participant.status === "in_match") {
       await handleMatchForfeit(io, userId);
     }
 
@@ -514,16 +705,44 @@ export const round1Handler = (io, socket) => {
 
             await redis.multi()
                 .hset(keys.matches, matchId, JSON.stringify(matchDetails))
-                .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in-match' }))
-                .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in-match' }))
+                .hset(keys.participants, player1.id, JSON.stringify({ ...player1, status: 'in_match' }))
+                .hset(keys.participants, player2.id, JSON.stringify({ ...player2, status: 'in_match' }))
                 .exec();
 
 
             const matchRoom = `match:${matchId}`;
-            const matchPayload = { question, startTime, duration: timerDuration };
             
-            io.to(`user:${player1.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player2.id, rank: player2.rank } });
-            io.to(`user:${player2.id}`).emit('round1:matchFound', { ...matchPayload, opponent: { id: player1.id, rank: player1.rank } });
+            // Create unified session payload for both players
+            const sessionPayload1 = {
+                type: 'match',
+                id: matchId,
+                startTime,
+                endTime: startTime + timerDuration,
+                timeRemaining: Math.floor(timerDuration / 1000),
+                opponent: {
+                    id: player2.id,
+                    username: player2.username,
+                    rank: player2.rank
+                },
+                problem: question
+            };
+            
+            const sessionPayload2 = {
+                type: 'match',
+                id: matchId,
+                startTime,
+                endTime: startTime + timerDuration,
+                timeRemaining: Math.floor(timerDuration / 1000),
+                opponent: {
+                    id: player1.id,
+                    username: player1.username,
+                    rank: player1.rank
+                },
+                problem: question
+            };
+            
+            io.to(`user:${player1.id}`).emit('round1:matchFound', sessionPayload1);
+            io.to(`user:${player2.id}`).emit('round1:matchFound', sessionPayload2);
             
             const [socket1] = await io.in(`user:${player1.id}`).allSockets();
             const [socket2] = await io.in(`user:${player2.id}`).allSockets();
@@ -669,7 +888,12 @@ const runMatchmakingCycle = async () => {
 
 
         try {
-            if (await redis.hget(keys.participants, userId)) return callback?.({ success: true, message: 'Already joined.' });
+            if (await redis.hget(keys.participants, userId)) {
+                const allParticipants = await getEnrichedParticipantsList();
+                const unifiedState = await transformToUnifiedState(userId, allParticipants, socket);
+                unifiedState.message = 'Already joined.';
+                return callback?.(unifiedState);
+            }
             if (await redis.get(keys.status) === 'ended') return callback?.({ success: false, error: 'Round has already ended.' });
             
             const userData = await prisma.user.findUnique({ where: { id: email } });
@@ -689,7 +913,11 @@ const runMatchmakingCycle = async () => {
 
 
             await broadcastLobbyUpdate(io);
-            callback?.({ success: true, message: 'Successfully joined lobby.' });
+            
+            const allParticipants = await getEnrichedParticipantsList();
+            const unifiedState = await transformToUnifiedState(userId, allParticipants, socket);
+            unifiedState.message = 'Successfully joined lobby.';
+            callback?.(unifiedState);
         } catch (err) {
             console.error('[Join Error]', err);
             callback?.({ success: false, error: 'Server error during join.' });
@@ -741,7 +969,21 @@ const runMatchmakingCycle = async () => {
         startMatchmakingCycleBroadcast(roundStartTime);
         runMatchmakingCycle();
         
-        io.emit('round1:started', { roundStartTime, roundDuration: ROUND_DURATION });
+        const startPayload = {
+            success: true,
+            timestamp: Date.now(),
+            roundNumber: ROUND_NUMBER,
+            round: {
+                isActive: true,
+                status: 'IN_PROGRESS',
+                startTime: roundStartTime,
+                endTime: roundStartTime + ROUND_DURATION,
+                timeRemaining: Math.floor(ROUND_DURATION / 1000),
+                duration: ROUND_DURATION
+            }
+        };
+        
+        io.emit('round1:started', startPayload);
         await broadcastLobbyUpdate(io);
         callback?.({ success: true, message: 'Round 1 started.' });
     });
@@ -771,17 +1013,10 @@ const runMatchmakingCycle = async () => {
             let participant = allParticipants.find(p => p.id === userId) || null;
 
             if (!participant) {
-                socket.emit("round1:state", {
-                    success: true,
-                    participant: null,
-                    allParticipants,
-                    isActive: await redis.get(keys.status) === "running",
-                    globalTimeRemaining: 0,
-                    nextMatchmakingCycle: null,
-                    matchData: null,
-                });
+                const unifiedState = await transformToUnifiedState(userId, allParticipants, socket);
+                socket.emit("round1:state", unifiedState);
                 return;
-                }
+            }
 
             
             if (participant.status === 'cooldown' && Date.now() > participant.cooldownEndTime) {
@@ -811,57 +1046,12 @@ const runMatchmakingCycle = async () => {
                 }
             }
             
-            // ✅ FIX: This variable will hold match data if found.
-            let matchDataForClient = null;
-            if (participant.status === 'in-match') {
-                const matches = await redis.hgetall(keys.matches);
-                for (const matchId in matches) {
-                    const match = JSON.parse(matches[matchId]);
-                    if (match.players.includes(userId)) {
-                        console.log(`[GetState] Re-joining user ${userId} to match ${matchId}`);
-                        socket.join(`match:${matchId}`);
-                        
-                        const question = await prisma.problem.findUnique({ where: { id: match.problemId }});
-                        const opponentId = match.players.find(pId => pId !== userId);
-                        const opponent = opponentId ? allParticipants.find(p => p.id === opponentId) : null;
-                        
-                        // ✅ FIX: Assign the found match data to the variable.
-                        matchDataForClient = {
-                            question,
-                            opponent: opponent ? { id: opponent.id, rank: opponent.rank } : { id: opponentId, rank: 'N/A' },
-                            startTime: match.startTime,
-                            duration: match.duration,
-                        };
-                        break;
-                    }
-                }
-            }
-
-            const currentStatus = await redis.get(keys.status);
-            const startTimeStr = await redis.get(keys.startTime);
-            const roundStartTime = startTimeStr ? parseInt(startTimeStr) : null;
-            const globalTimeRemaining = roundStartTime ? Math.max(0, Math.floor((ROUND_DURATION - (Date.now() - roundStartTime)) / 1000)) : 0;
-            
-            let nextMatchmakingCycle = null;
-            if (currentStatus === "running" && roundStartTime) {
-                const elapsed = Date.now() - roundStartTime;
-                const timeIntoCycle = elapsed % MATCHMAKING_INTERVAL;
-                nextMatchmakingCycle = Math.floor((MATCHMAKING_INTERVAL - timeIntoCycle) / 1000);
-            }
-            
-            // ✅ FIX: Include matchDataForClient in the final callback payload.
-            socket.emit("round1:state",{
-                success: true,
-                participant,
-                isActive: currentStatus === "running",
-                globalTimeRemaining,
-                allParticipants,
-                nextMatchmakingCycle,
-                matchData: matchDataForClient, // This was the missing piece.
-            });
+            // Generate unified state with session data if in match
+            const unifiedState = await transformToUnifiedState(userId, allParticipants, socket);
+            socket.emit("round1:state", unifiedState);
         } catch (err) {
             console.error('[GetState Error]', err);
-            return;
+            socket.emit("round1:state", { success: false, error: 'Failed to fetch state.' });
         }
     });
 
