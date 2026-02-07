@@ -103,6 +103,7 @@ const broadcastLobbyUpdate = async () => {
     round2IO.to('round2_lobby').emit("round2:lobby", {
       participants: participantsList,
       isRoundActive: !!isRoundActive,
+      isActive: !!isRoundActive,
     });
   } catch (err) {
     console.error("Error broadcasting R2 lobby state:", err);
@@ -276,37 +277,36 @@ export const round2Handler = (io, socket) => {
   bountyEndHandler = handleBountyEnd;
 
   const handleLobbyJoin = async (payload, callback) => {
-    try {
-      const userId = socket.user?.email;
-      if (!userId) {
-        console.error("[R2] Join failed: No userId");
-        return callback?.({ success: false, message: "Authentication error." });
-      }
+  try {
+    const userId = socket.user?.email;
+    if (!userId) return callback?.({ success: false, message: "Authentication error." });
 
-      const round2Status = await prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true }});
-      if (round2Status?.status !== 'LOBBY') {
-          console.error(`[R2] Join failed: Round status is ${round2Status?.status}`);
-          return callback?.({ success: false, message: `Round 2 is not in lobby phase. Current status: ${round2Status?.status}` });
-      }
+    // Join socket room FIRST
+    socket.join("round2_lobby");
+    console.debug(`[R2] Socket joined round2_lobby: ${userId}`);
 
-      if (await redis.hget(keys.participants, userId)) {
-        await broadcastLobbyUpdate();
-        return callback?.({ success: true, message: "Rejoined lobby." });
-      }
-
-      const user = await prisma.user.findUnique({ where: { id: userId } });
-      if (!user) return callback?.({ success: false, message: "User not found." });
-
-      const participant = { id: user.id, username: user.username || user.id.split('@')[0], status: 'lobby' };
-      await redis.hset(keys.participants, userId, JSON.stringify(participant));
-
+    const participantStr = await redis.hget(keys.participants, userId);
+    if (participantStr) {
+      console.debug(`[R2] User ${userId} already in lobby`);
       await broadcastLobbyUpdate();
-      callback?.({ success: true, message: "Joined lobby successfully." });
-    } catch (err) {
-      console.error("[R2] Error in handleLobbyJoin:", err);
-      callback?.({ success: false, message: "Server error during join." });
+      return callback?.({ success: true, message: "Rejoined lobby." });
     }
-  };
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return callback?.({ success: false, message: "User not found." });
+
+    const participant = { id: user.id, username: user.username || user.id.split('@')[0], status: 'lobby' };
+    await redis.hset(keys.participants, userId, JSON.stringify(participant));
+    
+    console.debug(`[R2] User ${userId} added to participants`);
+    await broadcastLobbyUpdate();
+    
+    callback?.({ success: true, message: "Joined lobby successfully." });
+  } catch (err) {
+    console.error("[R2] Error in handleLobbyJoin:", err);
+    callback?.({ success: false, message: "Server error during join." });
+  }
+};
 
   const handleStart = async (payload, callback) => {
     try {
@@ -427,27 +427,28 @@ export const round2Handler = (io, socket) => {
         }
       }
 
-      // Build optimal response format
-      const response = {
-        success: true,
-        timestamp: Date.now(),
-        roundNumber: 2,
+      socket.emit("round2:state", {
+      success: true,
+      state: {
         round: {
-          isActive,
-          status,
+          number: 2,
+          status: status,              // 'LOBBY' | 'IN_PROGRESS' | 'COMPLETED'
+          isActive: isActive,
           endTime,
           timeRemaining,
-          nextMatchmakingCycle: null // Can be calculated based on your matchmaking logic
         },
-        participants: {
-          total: allParticipants.length,
-          byStatus,
-          all: allParticipants // Include for leaderboard functionality
-        },
-        currentUser: participant
-      };
 
-      socket.emit("round2:state", response);
+        currentUser: {
+          id: userId,
+          role: participant?.role ?? null,  // 'elite' | 'challenger' | null
+          status: participant?.status ?? null,
+          activeSession: Boolean(userMatchId || activeBountyKey),
+        },
+
+        participants: allParticipants, // 🔑 flat array, always
+      }
+    });
+    
     } catch (err) {
       console.error("[R2] Error in handleGetState:", err);
       socket.emit("round2:state", {
