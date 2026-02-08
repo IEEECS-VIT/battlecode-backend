@@ -77,12 +77,56 @@ export const round3Handler = (io, socket) => {
     try {
       const keys = getRedisKeys();
       const allParticipantsRaw = await redis.hgetall(keys.lobby);
-      const lobbyParticipants = Object.values(allParticipantsRaw).map(p => JSON.parse(p));
+      const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
+        userId: uid,
+        ...JSON.parse(value)
+      }));
+
+      // Get round status from database
+      const round3DB = await prisma.round.findUnique({
+        where: { roundNumber: ROUND_NUMBER }
+      });
+
+      // Calculate timeRemaining
+      let timeRemaining = 0;
+      if (globalRoundState.isActive && globalRoundState.startTime) {
+        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      }
+
+      // Group participants by status
+      const byStatus = {
+        lobby: lobbyParticipants.filter(p => (p.status || 'lobby').toLowerCase() === 'lobby'),
+        waiting: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'waiting'),
+        in_match: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'in_match'),
+        cooldown: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'cooldown'),
+        finished: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'finished'),
+        disconnected: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'disconnected')
+      };
 
       io.to(`round${ROUND_NUMBER}`).emit('lobby:round3', {
-        participants: lobbyParticipants,
-        totalParticipants: lobbyParticipants.length,
-        isActive: globalRoundState.isActive,
+        success: true,
+        timestamp: Date.now(),
+        roundNumber: ROUND_NUMBER,
+        
+        round: {
+          isActive: globalRoundState.isActive,
+          status: round3DB?.status || 'LOBBY',
+          startTime: globalRoundState.startTime,
+          endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+          timeRemaining,
+          duration: ROUND_DURATION
+        },
+        
+        participants: {
+          total: lobbyParticipants.length,
+          byStatus,
+          all: lobbyParticipants
+        },
+        
+        roundSpecific: {
+          isHackingPhase: globalRoundState.isHackingPhase
+        }
       });
     } catch (error) {
       console.error('[ROUND 3] Error broadcasting lobby update:', error);
@@ -220,8 +264,21 @@ export const round3Handler = (io, socket) => {
       }
 
       const startTime = Date.now();
-      const redisPipeline = redis.pipeline();
       const keys = getRedisKeys();
+      
+      // Update all participants to 'in_match' status
+      const allParticipantsRaw = await redis.hgetall(keys.lobby);
+      const updatePromises = [];
+      
+      for (const [uid, dataStr] of Object.entries(allParticipantsRaw)) {
+        const participantData = JSON.parse(dataStr);
+        participantData.status = 'in_match'; // Update status to in_match
+        updatePromises.push(redis.hset(keys.lobby, uid, JSON.stringify(participantData)));
+      }
+      
+      await Promise.all(updatePromises);
+      
+      const redisPipeline = redis.pipeline();
       redisPipeline.set(keys.state, 'IN_PROGRESS');
       redisPipeline.set(keys.timer, startTime);
       redisPipeline.set(keys.problems, JSON.stringify(problems));
@@ -242,6 +299,9 @@ export const round3Handler = (io, socket) => {
         startTime,
         duration: ROUND_DURATION,
       });
+      
+      // Broadcast updated lobby state with participants now in 'in_match'
+      await broadcastLobbyUpdate();
 
       console.log(`[ROUND 3] Round started by user ${user.username}.`);
       callback?.({ success: true, message: 'Round 3 has started.' });
@@ -262,20 +322,43 @@ export const round3Handler = (io, socket) => {
       if (!globalRoundState.isHackingPhase) {
         return callback?.({ success: false, error: 'Hacking phase is not active yet.' });
       }
-      const successfulSubmission = await prisma.submission.findFirst({
-        where: { userId, problemId: questionId, roundId: ROUND_NUMBER },
+      const acceptedSubmission = await prisma.submission.findFirst({
+        where: { 
+          userId, 
+          problemId: questionId, 
+          roundId: ROUND_NUMBER,
+          status: SubmissionStatus.ACCEPTED 
+        },
       });
-      if (!successfulSubmission) {
+      if (!acceptedSubmission) {
         return callback?.({ success: false, error: 'You must have an accepted solution to lock this question.' });
       }
       const existingLock = await prisma.lockedSolution.findUnique({
         where: { userId_questionId: { userId, questionId } },
       });
+      
+      // Always update the user's submission status from ACCEPTED to LOCKED
+      await prisma.submission.updateMany({
+        where: { 
+          userId, 
+          problemId: questionId, 
+          roundId: ROUND_NUMBER,
+          status: SubmissionStatus.ACCEPTED 
+        },
+        data: { status: SubmissionStatus.LOCKED }
+      });
+      
       if (!existingLock) {
         await prisma.lockedSolution.create({ data: { userId, questionId } });
       }
+      
+      // Fetch other users' LOCKED submissions (not ACCEPTED)
       const otherSubmissions = await prisma.submission.findMany({
-        where: { problemId: questionId, status: SubmissionStatus.ACCEPTED, NOT: { userId: userId } },
+        where: { 
+          problemId: questionId, 
+          status: SubmissionStatus.LOCKED,
+          NOT: { userId: userId } 
+        },
         orderBy: { createdAt: 'desc' },
         distinct: ['userId'],
         select: { userId: true, code: true, language: true, user: { select: { username: true } } }
@@ -286,6 +369,53 @@ export const round3Handler = (io, socket) => {
     } catch (err) {
       console.error(`[ROUND 3] Error locking question ${questionId} for user ${userId}:`, err);
       callback?.({ success: false, error: 'Server error while locking question.' });
+    }
+  };
+
+  const handleGetLockedSubmissions = async (payload, callback) => {
+    const { userId, error } = validateUser();
+    if (error) return callback?.({ success: false, error });
+    
+    const { questionId } = payload;
+    if (!questionId) return callback?.({ success: false, error: 'Question ID is required.' });
+
+    try {
+      // Verify user has locked this question
+      const userLock = await prisma.lockedSolution.findUnique({
+        where: { userId_questionId: { userId, questionId } },
+      });
+      
+      if (!userLock) {
+        return callback?.({ success: false, error: 'You have not locked this question.' });
+      }
+
+      // Fetch ALL LOCKED submissions from other users
+      const otherSubmissions = await prisma.submission.findMany({
+        where: { 
+          problemId: questionId,
+          roundId: ROUND_NUMBER,
+          status: SubmissionStatus.LOCKED,
+          NOT: { userId: userId }
+        },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['userId'],
+        select: { 
+          userId: true, 
+          code: true, 
+          language: true, 
+          user: { select: { username: true } } 
+        }
+      });
+
+      callback?.({ 
+        success: true, 
+        questionId,
+        submissions: otherSubmissions 
+      });
+      
+    } catch (err) {
+      console.error(`[ROUND 3] Error fetching locked submissions for question ${questionId}:`, err);
+      callback?.({ success: false, error: 'Server error while fetching submissions.' });
     }
   };
 
@@ -339,33 +469,197 @@ export const round3Handler = (io, socket) => {
   };
 
   const handleGetState = async (payload) => {
-    const { userId, error } = validateUser();
-    if (error) return;
     try {
-      const keys = getRedisKeys();
-      const elapsed = globalRoundState.startTime ? Math.floor((Date.now() - globalRoundState.startTime) / 1000) : 0;
-      const timeRemaining = Math.max(0, ROUND_DURATION - elapsed);
-      const locked = await prisma.lockedSolution.findMany({ where: { userId }, select: { questionId: true } });
-      const lockedQuestionIds = locked.map(l => l.questionId);
-      
-      // Get participants list from Redis
-      const allParticipantsRaw = await redis.hgetall(keys.lobby);
-      const participants = Object.values(allParticipantsRaw).map(p => JSON.parse(p));
-      
+      const validation = validateUser();
+      if (validation.error) {
+        socket.emit('round3:state', { 
+          success: false, 
+          error: validation.error,
+          timestamp: Date.now(),
+          roundNumber: ROUND_NUMBER,
+          round: {
+            isActive: false,
+            status: 'LOBBY',
+            startTime: null,
+            endTime: null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: 0,
+            byStatus: {
+              lobby: [],
+              waiting: [],
+              in_match: [],
+              cooldown: [],
+              finished: [],
+              disconnected: []
+            },
+            all: []
+          },
+          currentUser: null
+        });
+        return;
+      }
+      const { userId } = validation;
+
+      // Join socket rooms
       socket.join(`round${ROUND_NUMBER}`);
-      socket.emit('round3:state', { 
-        success: true, 
-        isActive: globalRoundState.isActive, 
-        isHackingPhase: globalRoundState.isHackingPhase, 
-        timeRemaining, 
-        questions: globalRoundState.problems, 
-        lockedQuestionIds,
-        participants,
-        totalParticipants: participants.length
+      socket.join(`user:${userId}`);
+
+      // Check database status first
+      const round3DB = await prisma.round.findUnique({
+        where: { roundNumber: ROUND_NUMBER }
       });
+
+      if (!round3DB) {
+        socket.emit('round3:state', { 
+          success: false, 
+          error: 'Round 3 not found in database',
+          timestamp: Date.now(),
+          roundNumber: ROUND_NUMBER,
+          round: {
+            isActive: false,
+            status: 'LOBBY',
+            startTime: null,
+            endTime: null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION
+          },
+          participants: {
+            total: 0,
+            byStatus: {
+              lobby: [],
+              waiting: [],
+              in_match: [],
+              cooldown: [],
+              finished: [],
+              disconnected: []
+            },
+            all: []
+          },
+          currentUser: null
+        });
+        return;
+      }
+
+      const keys = getRedisKeys();
+
+      // Always get lobby participants
+      const allParticipantsRaw = await redis.hgetall(keys.lobby);
+      const allParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
+        userId: uid,
+        ...JSON.parse(value)
+      }));
+
+      // Find current user's participant data
+      const participant = allParticipants.find(p => p.userId === userId) || null;
+
+      // Calculate timeRemaining
+      let timeRemaining = 0;
+      if (globalRoundState.isActive && globalRoundState.startTime) {
+        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      }
+
+      // Group participants by status
+      const byStatus = {
+        lobby: allParticipants.filter(p => (p.status || 'lobby').toLowerCase() === 'lobby'),
+        waiting: allParticipants.filter(p => (p.status || '').toLowerCase() === 'waiting'),
+        in_match: allParticipants.filter(p => (p.status || '').toLowerCase() === 'in_match'),
+        cooldown: allParticipants.filter(p => (p.status || '').toLowerCase() === 'cooldown'),
+        finished: allParticipants.filter(p => (p.status || '').toLowerCase() === 'finished'),
+        disconnected: allParticipants.filter(p => (p.status || '').toLowerCase() === 'disconnected')
+      };
+
+      // Sync in-memory state with database if needed
+      if (!globalRoundState.isActive && round3DB.status === 'IN_PROGRESS') {
+        console.log('[ROUND 3] Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
+        await syncGlobalStateWithRedis();
+        
+        // Recalculate timeRemaining after sync
+        if (globalRoundState.isActive && globalRoundState.startTime) {
+          const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+          timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+        }
+      }
+
+      // Get user's locked questions
+      const locked = await prisma.lockedSolution.findMany({ 
+        where: { userId }, 
+        select: { questionId: true } 
+      });
+      const lockedQuestionIds = locked.map(l => l.questionId);
+
+      // Base unified state response
+      const unifiedState = {
+        success: true,
+        timestamp: Date.now(),
+        roundNumber: ROUND_NUMBER,
+        
+        round: {
+          isActive: globalRoundState.isActive,
+          status: round3DB.status,
+          startTime: globalRoundState.startTime,
+          endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+          timeRemaining,
+          duration: ROUND_DURATION
+        },
+        
+        participants: {
+          total: allParticipants.length,
+          byStatus,
+          all: allParticipants
+        },
+        
+        currentUser: participant,
+        
+        roundSpecific: {
+          lockedQuestionIds,
+          questions: globalRoundState.problems,
+          isHackingPhase: globalRoundState.isHackingPhase
+        },
+        
+        message: round3DB.status === 'LOBBY' 
+          ? 'Round not started yet' 
+          : round3DB.status === 'COMPLETED' 
+            ? 'Round ended' 
+            : globalRoundState.isHackingPhase 
+              ? 'Hacking phase active'
+              : 'Round in progress'
+      };
+
+      socket.emit('round3:state', unifiedState);
+
     } catch (err) {
       console.error('[ROUND 3] Error getting state:', err);
-      socket.emit('round3:state', { success: false, error: 'Failed to retrieve state.' });
+      socket.emit('round3:state', { 
+        success: false, 
+        error: 'Failed to retrieve state.',
+        timestamp: Date.now(),
+        roundNumber: ROUND_NUMBER,
+        round: {
+          isActive: false,
+          status: 'LOBBY',
+          startTime: null,
+          endTime: null,
+          timeRemaining: 0,
+          duration: ROUND_DURATION
+        },
+        participants: {
+          total: 0,
+          byStatus: {
+            lobby: [],
+            waiting: [],
+            in_match: [],
+            cooldown: [],
+            finished: [],
+            disconnected: []
+          },
+          all: []
+        },
+        currentUser: null
+      });
     }
   };
   
@@ -414,6 +708,7 @@ export const round3Handler = (io, socket) => {
   socket.on('round3:join', handleJoinLobby);
   socket.on('round3:ready', handleAdminReady);
   socket.on('round3:lockQuestion', handleLockQuestion);
+  socket.on('round3:getLockedSubmissions', handleGetLockedSubmissions);
   socket.on('round3:hackAttempt', handleHackAttempt);
   socket.on('round3:getState', handleGetState);
   socket.on('round3:reset', handleReset);

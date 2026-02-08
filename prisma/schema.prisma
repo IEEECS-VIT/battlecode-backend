@@ -148,6 +148,7 @@ enum Round2Role {
 enum SubmissionStatus {
   PENDING
   ACCEPTED
+  LOCKED
   WRONG_ANSWER
   TIME_LIMIT_EXCEEDED
   COMPILATION_ERROR
