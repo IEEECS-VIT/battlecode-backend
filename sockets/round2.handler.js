@@ -38,6 +38,7 @@ const getRedisKeys = (userId = '', questionId = '', matchId = '') => ({
     rejectCount: (id = userId) => `round2:rejects:${id}`,
     solvedBounties: () => "round2:solvedBounties",
     attemptedBounties: (id = userId) => `round2:attempted:${id}`,
+    challengerLock: (challengerId) => `r2:challenger:lock:${challengerId}`
 });
 
 const updatePlayerRole = async (userId) => {
@@ -821,6 +822,15 @@ export const round2Handler = (io, socket) => {
     try {
         const { eliteId } = payload;
         const challengerId = socket.user.email;
+
+          // 🚫 Challenger already locked into a match
+          if (await redis.exists(keys.challengerLock(challengerId))) {
+            return callback?.({
+              success: false,
+              message: "You are already being matched with an elite."
+            });
+          }
+
         if (await redis.get(keys.userMatch(challengerId)) || await redis.get(keys.activeBounty(challengerId))) {
             return callback({ success: false, message: "You are already in an active session." });
         }
@@ -865,9 +875,55 @@ export const round2Handler = (io, socket) => {
         const { challengerId } = payload;
         const eliteId = socket.user.email;
 
+        // Check elite active session BEFORE acquiring any locks
         if (await redis.get(keys.userMatch(eliteId)) || await redis.get(keys.activeBounty(eliteId))) {
             return callback({ success: false, message: "You are already in an active session." });
         }
+
+        const lockKey = keys.challengerLock(challengerId);
+
+        // Atomic lock (NX = only if not exists)
+        const lockAcquired = await redis.set(
+          lockKey,
+          eliteId,
+          'NX',
+          'EX',
+          30 // safety TTL
+        );
+
+        if (!lockAcquired) {
+          return callback?.({
+            success: false,
+            message: "Challenger already matched with another elite."
+          });
+        }
+
+        const otherEliteIds = await redis.smembers(keys.outgoingRequests(challengerId));
+
+        const invalidateMulti = redis.multi();
+
+        for (const otherEliteId of otherEliteIds) {
+          if (otherEliteId === eliteId) continue;
+
+          const otherReqKey = keys.challengeRequest(challengerId, otherEliteId);
+
+          if (requestTimeouts.has(otherReqKey)) {
+            clearTimeout(requestTimeouts.get(otherReqKey));
+            requestTimeouts.delete(otherReqKey);
+          }
+
+          invalidateMulti.del(otherReqKey);
+          invalidateMulti.srem(keys.pendingRequests(otherEliteId), challengerId);
+
+          io.to(`user:${otherEliteId}`).emit("round2:challengeExpired", {
+            challengerId,
+            reason: "Challenger accepted another match."
+          });
+        }
+
+        // Challenger no longer has outgoing requests
+        invalidateMulti.del(keys.outgoingRequests(challengerId));
+        await invalidateMulti.exec();
 
         const requestKey = keys.challengeRequest(challengerId, eliteId);
         if (requestTimeouts.has(requestKey)) { clearTimeout(requestTimeouts.get(requestKey)); requestTimeouts.delete(requestKey); }
