@@ -340,6 +340,11 @@ export const round2Handler = (io, socket) => {
       await Promise.all([multi.exec(), ...dbUpdatePromises]);
 
       await broadcastLobbyUpdate();
+
+      // 🔑 Push canonical state to all participants after round start
+      for (const player of players) {
+        io.to(`user:${player.id}`).emit("round2:getState");
+      }
       callback({ success: true });
     } catch (err) {
       console.error("[R2] Error in handleStart:", err);
