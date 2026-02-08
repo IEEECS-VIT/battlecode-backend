@@ -95,15 +95,78 @@ const broadcastLobbyUpdate = async () => {
   if (!round2IO) return;
   try {
     const keys = getRedisKeys();
-    const [participantsData, isRoundActive] = await Promise.all([
+    const [participantsData, roundStarted, endTimeStr, roundStatus] = await Promise.all([
       redis.hgetall(keys.participants),
       redis.get(keys.roundStarted),
+      redis.get(keys.roundEndTime),
+      prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true } })
     ]);
-    const participantsList = Object.values(participantsData).map(p => JSON.parse(p));
+    
+    const participantsList = Object.values(participantsData || {}).map(p => JSON.parse(p));
+    const isActive = !!roundStarted;
+    const endTime = endTimeStr ? parseInt(endTimeStr) : null;
+    const timeRemaining = endTime ? Math.max(0, endTime - Date.now()) : 0;
+    const startTime = endTime ? endTime - ROUND_DURATION_MS : null;
+    
+    // Determine status
+    let status = 'LOBBY';
+    if (roundStatus?.status) {
+      status = roundStatus.status;
+    } else if (isActive) {
+      status = 'IN_PROGRESS';
+    }
+    
+    // Categorize participants
+    const byStatus = {
+      lobby: [],
+      waiting: [],
+      in_match: [],
+      in_bounty: [],
+      finished: [],
+      disconnected: [],
+      cooldown: []
+    };
+
+    for (const p of participantsList) {
+      const statusKey = p.status ? p.status.toLowerCase() : 'lobby';
+      
+      if (statusKey.includes('idle')) {
+        byStatus.waiting.push(p);
+      } else if (statusKey.includes('match')) {
+        byStatus.in_match.push(p);
+      } else if (statusKey.includes('bounty')) {
+        byStatus.in_bounty.push(p);
+      } else if (statusKey.includes('cooldown')) {
+        byStatus.cooldown.push(p);
+      } else if (statusKey.includes('finished') || statusKey.includes('completed')) {
+        byStatus.finished.push(p);
+      } else if (statusKey.includes('disconnected')) {
+        byStatus.disconnected.push(p);
+      } else {
+        byStatus.lobby.push(p);
+      }
+    }
+    
     round2IO.to('round2_lobby').emit("round2:lobby", {
-      participants: participantsList,
-      isRoundActive: !!isRoundActive,
-      isActive: !!isRoundActive,
+      success: true,
+      timestamp: Date.now(),
+      roundNumber: 2,
+      round: {
+        isActive,
+        status,
+        startTime,
+        endTime,
+        timeRemaining,
+        duration: ROUND_DURATION_MS
+      },
+      participants: {
+        total: participantsList.length,
+        byStatus,
+        all: participantsList
+      },
+      // Legacy fields for backward compatibility
+      isRoundActive: isActive,
+      participantCount: participantsList.length
     });
   } catch (err) {
     console.error("Error broadcasting R2 lobby state:", err);
@@ -279,21 +342,53 @@ export const round2Handler = (io, socket) => {
   const handleLobbyJoin = async (payload, callback) => {
   try {
     const userId = socket.user?.email;
-    if (!userId) return callback?.({ success: false, message: "Authentication error." });
+    if (!userId) {
+      return callback?.({ 
+        success: false, 
+        message: "Authentication error.",
+        roundNumber: 2,
+        isActive: false,
+        participantCount: 0
+      });
+    }
 
     // Join socket room FIRST
     socket.join("round2_lobby");
     console.debug(`[R2] Socket joined round2_lobby: ${userId}`);
 
+    // Get round status info
+    const [roundStarted, roundStatus, participantsData] = await Promise.all([
+      redis.get(keys.roundStarted),
+      prisma.round.findUnique({ where: { roundNumber: 2 }, select: { status: true } }),
+      redis.hgetall(keys.participants)
+    ]);
+
+    const isActive = !!roundStarted;
+    const participantsList = Object.values(participantsData || {}).map(p => JSON.parse(p));
+
     const participantStr = await redis.hget(keys.participants, userId);
     if (participantStr) {
       console.debug(`[R2] User ${userId} already in lobby`);
       await broadcastLobbyUpdate();
-      return callback?.({ success: true, message: "Rejoined lobby." });
+      return callback?.({ 
+        success: true, 
+        message: "Rejoined lobby.",
+        roundNumber: 2,
+        isActive,
+        participantCount: participantsList.length
+      });
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) return callback?.({ success: false, message: "User not found." });
+    if (!user) {
+      return callback?.({ 
+        success: false, 
+        message: "User not found.",
+        roundNumber: 2,
+        isActive,
+        participantCount: participantsList.length
+      });
+    }
 
     const participant = { id: user.id, username: user.username || user.id.split('@')[0], status: 'lobby' };
     await redis.hset(keys.participants, userId, JSON.stringify(participant));
@@ -301,10 +396,22 @@ export const round2Handler = (io, socket) => {
     console.debug(`[R2] User ${userId} added to participants`);
     await broadcastLobbyUpdate();
     
-    callback?.({ success: true, message: "Joined lobby successfully." });
+    callback?.({ 
+      success: true, 
+      message: "Joined lobby successfully.",
+      roundNumber: 2,
+      isActive,
+      participantCount: participantsList.length + 1
+    });
   } catch (err) {
     console.error("[R2] Error in handleLobbyJoin:", err);
-    callback?.({ success: false, message: "Server error during join." });
+    callback?.({ 
+      success: false, 
+      message: "Server error during join.",
+      roundNumber: 2,
+      isActive: false,
+      participantCount: 0
+    });
   }
 };
 
@@ -361,7 +468,29 @@ export const round2Handler = (io, socket) => {
           success: false,
           error: "Authentication error.",
           timestamp: Date.now(),
-          roundNumber: 2
+          roundNumber: 2,
+          round: {
+            isActive: false,
+            status: 'LOBBY',
+            startTime: null,
+            endTime: null,
+            timeRemaining: 0,
+            duration: ROUND_DURATION_MS
+          },
+          participants: {
+            total: 0,
+            byStatus: {
+              lobby: [],
+              waiting: [],
+              in_match: [],
+              in_bounty: [],
+              cooldown: [],
+              finished: [],
+              disconnected: []
+            },
+            all: []
+          },
+          currentUser: null
         });
         return;
       }
@@ -404,11 +533,12 @@ export const round2Handler = (io, socket) => {
       const endTime = endTimeStr ? parseInt(endTimeStr) : null;
       const timeRemaining = endTime ? Math.max(0, endTime - Date.now()) : 0;
 
-      // Categorize participants by status
-      const byStatus = {
+      // Categorize participants including in_bounty for Round 2
+      const byStatusR2 = {
         lobby: [],
         waiting: [],
         in_match: [],
+        in_bounty: [],
         finished: [],
         disconnected: [],
         cooldown: []
@@ -418,41 +548,135 @@ export const round2Handler = (io, socket) => {
         const statusKey = p.status ? p.status.toLowerCase() : 'lobby';
         
         if (statusKey.includes('idle')) {
-          byStatus.waiting.push(p);
-        } else if (statusKey.includes('match') || statusKey.includes('bounty')) {
-          byStatus.in_match.push(p);
+          byStatusR2.waiting.push(p);
+        } else if (statusKey.includes('match')) {
+          byStatusR2.in_match.push(p);
+        } else if (statusKey.includes('bounty')) {
+          byStatusR2.in_bounty.push(p);
         } else if (statusKey.includes('cooldown')) {
-          byStatus.cooldown.push(p);
+          byStatusR2.cooldown.push(p);
         } else if (statusKey.includes('finished') || statusKey.includes('completed')) {
-          byStatus.finished.push(p);
+          byStatusR2.finished.push(p);
         } else if (statusKey.includes('disconnected')) {
-          byStatus.disconnected.push(p);
+          byStatusR2.disconnected.push(p);
         } else {
-          byStatus.lobby.push(p);
+          byStatusR2.lobby.push(p);
         }
       }
 
+      // Calculate startTime from endTime
+      const startTime = endTime ? endTime - ROUND_DURATION_MS : null;
+
+      // Build session object if user has active match or bounty
+      let session = undefined;
+      if (userMatchId) {
+        const matchDataStr = await redis.get(keys.matchInfo(userMatchId));
+        if (matchDataStr) {
+          const matchData = JSON.parse(matchDataStr);
+          const opponentId = matchData.challengerId === userId ? matchData.eliteId : matchData.challengerId;
+          const opponentData = allParticipants.find(p => p.id === opponentId);
+          
+          session = {
+            type: 'match',
+            id: userMatchId,
+            startTime: matchData.startTime || Date.now(),
+            endTime: matchData.endTime || (Date.now() + MATCH_DURATION_MS),
+            timeRemaining: matchData.endTime ? Math.max(0, matchData.endTime - Date.now()) : MATCH_DURATION_MS,
+            opponent: opponentData ? {
+              id: opponentData.id,
+              username: opponentData.username,
+              rank: opponentData.rank
+            } : undefined,
+            problem: matchData.question
+          };
+        }
+      } else if (activeBountyKey) {
+        const bountySession = await redis.hgetall(activeBountyKey);
+        if (bountySession && bountySession.questionId) {
+          const question = await prisma.problem.findUnique({ where: { id: bountySession.questionId } });
+          session = {
+            type: 'bounty',
+            id: activeBountyKey,
+            startTime: parseInt(bountySession.startTime) || Date.now(),
+            endTime: parseInt(bountySession.endTime) || (Date.now() + MATCH_DURATION_MS),
+            timeRemaining: bountySession.endTime ? Math.max(0, parseInt(bountySession.endTime) - Date.now()) : MATCH_DURATION_MS,
+            problem: question
+          };
+        }
+      }
+
+      // Get incoming requests for elites
+      let incomingRequests = [];
+      if (participant?.role === 'elite') {
+        const requestIds = await redis.smembers(keys.pendingRequests(userId));
+        const requestPromises = requestIds.map(async (challengerId) => {
+          const challenger = allParticipants.find(p => p.id === challengerId);
+          if (!challenger) return null;
+          const requestKey = keys.challengeRequest(challengerId, userId);
+          const ttl = await redis.ttl(requestKey);
+          if (ttl <= 0) return null;
+          return {
+            userId: challenger.id,
+            username: challenger.username,
+            rank: challenger.rank || 0,
+            expiresAt: Date.now() + ttl * 1000
+          };
+        });
+        incomingRequests = (await Promise.all(requestPromises)).filter(Boolean);
+      }
+
+      // Get pending requests for challengers
+      let pendingRequests = [];
+      if (participant?.role === 'challenger') {
+        pendingRequests = await redis.smembers(keys.outgoingRequests(userId));
+      }
+
+      // Get bounty questions with status
+      const allBountyQuestions = await prisma.problem.findMany({ where: { difficulty: 'R2_BOUNTY' } });
+      const userSubmissions = await prisma.submission.findMany({ 
+        where: { userId: userId, problem: { difficulty: 'R2_BOUNTY' }, status: 'ACCEPTED' } 
+      });
+      const solvedQuestionIds = new Set(userSubmissions.map(sub => sub.problemId));
+      const globallySolvedIds = await redis.smembers(keys.solvedBounties());
+      const globallySolvedSet = new Set(globallySolvedIds);
+      const userAttemptedIds = await redis.smembers(keys.attemptedBounties(userId));
+      const userAttemptedSet = new Set(userAttemptedIds);
+
+      const bountyQuestions = allBountyQuestions.map(q => ({
+        ...q,
+        isSolved: solvedQuestionIds.has(q.id),
+        isSolvedByAnyone: globallySolvedSet.has(q.id),
+        isAttemptedByUser: userAttemptedSet.has(q.id)
+      }));
+
+      // Emit unified state structure
       socket.emit("round2:state", {
-      success: true,
-      state: {
+        success: true,
+        timestamp: Date.now(),
+        roundNumber: 2,
         round: {
-          number: 2,
-          status: status,              // 'LOBBY' | 'IN_PROGRESS' | 'COMPLETED'
-          isActive: isActive,
+          isActive,
+          status,
+          startTime,
           endTime,
           timeRemaining,
+          duration: ROUND_DURATION_MS
         },
-
-        currentUser: {
-          id: userId,
-          role: participant?.role ?? null,  // 'elite' | 'challenger' | null
-          status: participant?.status ?? null,
-          activeSession: Boolean(userMatchId || activeBountyKey),
+        participants: {
+          total: allParticipants.length,
+          byStatus: byStatusR2,
+          all: allParticipants
         },
-
-        participants: allParticipants, // 🔑 flat array, always
-      }
-    });
+        currentUser: participant,
+        session,
+        roundSpecific: {
+          role: participant?.role,
+          incomingRequests,
+          pendingRequests,
+          bountyQuestions
+        },
+        message: 'State retrieved successfully'
+      });
     
     } catch (err) {
       console.error("[R2] Error in handleGetState:", err);
@@ -460,7 +684,29 @@ export const round2Handler = (io, socket) => {
         success: false,
         error: "Server error fetching state.",
         timestamp: Date.now(),
-        roundNumber: 2
+        roundNumber: 2,
+        round: {
+          isActive: false,
+          status: 'LOBBY',
+          startTime: null,
+          endTime: null,
+          timeRemaining: 0,
+          duration: ROUND_DURATION_MS
+        },
+        participants: {
+          total: 0,
+          byStatus: {
+            lobby: [],
+            waiting: [],
+            in_match: [],
+            in_bounty: [],
+            cooldown: [],
+            finished: [],
+            disconnected: []
+          },
+          all: []
+        },
+        currentUser: null
       });
     }
   };
