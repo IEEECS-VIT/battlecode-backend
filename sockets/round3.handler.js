@@ -783,11 +783,32 @@ export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
       username: user.username,
       email: userId,
       eventScore: user.eventScore,
-      status: roundDB.status === 'IN_PROGRESS' ? 'in_match' : 'waiting', // lowercase for Redis
+      status: roundDB.status === 'IN_PROGRESS' ? 'waiting' : 'lobby',
       joinedAt: new Date().toISOString()
     };
 
-    await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    if (roundDB.status === 'IN_PROGRESS') {
+      // 🔑 Add directly to participants, NOT lobby
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+    } else {
+      await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    }
+
+    io.to(`user:${userId}`).emit("round3:state", {
+      success: true,
+      roundNumber: 3,
+      round: {
+        number: 3,
+        status: roundDB.status,
+        isActive: roundDB.status === "IN_PROGRESS",
+      },
+      currentUser: {
+        id: userId,
+        role: null,
+        status: participant.status,
+        activeSession: false,
+      },
+    });
 
     io.to(`user:${userId}`).emit(`round${ROUND_NUMBER}:adminAdded`);
     io.emit("admin:success", { action: "add", userId, round: ROUND_NUMBER });

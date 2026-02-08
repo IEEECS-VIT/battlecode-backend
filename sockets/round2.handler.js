@@ -1224,6 +1224,38 @@ export const round2AdminRemoveUser = async (io, userId) => {
     await redis.del(keys.activeBounty(userId));
     await redis.del(keys.rejectCount(userId));
 
+    // 🔑 Force canonical state update to removed user
+    io.to(`user:${userId}`).emit("round2:state", {
+      success: true,
+      roundNumber: 2,
+      round: {
+        number: 2,
+        status: "LOBBY",
+        isActive: false,
+        endTime: null,
+        timeRemaining: 0,
+      },
+      currentUser: {
+        id: userId,
+        role: null,
+        status: null,
+        activeSession: false,
+      },
+      participants: {
+        all: [],
+        byStatus: {
+          lobby: [],
+          waiting: [],
+          in_match: [],
+          cooldown: [],
+          finished: [],
+          disconnected: [],
+        },
+      },
+    });
+
+    // Refresh lobby state for admin panels
+    io.emit("round2:getState");
     io.to(`user:${userId}`).emit("round2:adminRemoved");
     io.emit("admin:success", { action: "remove", userId, round: 2 });
 
