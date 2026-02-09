@@ -15,6 +15,8 @@ import {
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { handleMatchEnd } from "../sockets/round1.handler.js";
 import { getRound2Handlers } from "../sockets/round2.handler.js";
+import { broadcastLeaderboard } from "../sockets/global.handler.js";
+
 
 const router = express.Router();
 
@@ -394,10 +396,8 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
           totalTimeInSeconds - elapsedTimeInSeconds
         );
 
-        calculatedScore = ScoreCC(
-          totalCount,
-          passedCount,
-          isWinner
+        calculatedScore = ScoreRound1(
+          time_left, totalcases, passedcases, difficulty, win, submits
         );
 
         if (isWinner) {
@@ -521,6 +521,9 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         where: { id: userId },
         data: { eventScore: { increment: scoreImprovement } },
       });
+
+      await broadcastLeaderboard(io);
+      
       console.log("✅ [SUBMIT] User score updated. Improvement:", scoreImprovement);
     } else {
       console.log("ℹ️ [SUBMIT] No score improvement. Current score:", calculatedScore, "Previous best:", existingSubmission?.score || 0);
