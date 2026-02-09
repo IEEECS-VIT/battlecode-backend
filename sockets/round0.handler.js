@@ -28,7 +28,7 @@ import prisma from "../config/prisma.js";
  * - round0:user:{userId} - User presence
  */
 
-const ROUND_DURATION = 60 * 60;
+const ROUND_DURATION = 20 * 60;
 const ROUND_NUMBER = 0;
 
 let globalRoundState = {

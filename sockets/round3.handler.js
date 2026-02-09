@@ -8,10 +8,10 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
  * Manages the real-time state and events for Round 3 of the competition.
  */
 
-const ROUND_DURATION = 60 * 60; // 60 minutes in seconds
-// Hacking starts X seconds AFTER round start
-const HACKING_PHASE_START_AFTER_SECONDS = 30; // now
-// later: 30 * 60
+const MINUTE = 60;
+// Round 3 (seconds-based)
+const ROUND_DURATION = 90 * MINUTE;                  // 5400s = 1.5 hrs
+const HACKING_PHASE_START_AFTER_SECONDS = 30 * MINUTE; // 1800s = 30 mins
 
 const ROUND_NUMBER = 3;
 

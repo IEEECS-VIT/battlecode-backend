@@ -2,14 +2,17 @@ import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
 import { broadcastLeaderboard } from "./global.handler.js";
 
-// Constants
-const ROUND_DURATION = 60 * 60 * 1000;
-const ROUND_NUMBER = 1;
-const MATCHMAKING_INTERVAL = 3 * 60 * 1000;
-const COOLDOWN_DURATION = 0.5 * 60 * 1000;
-const JANITOR_INTERVAL = 5000;
-const LOBBY_UPDATE_INTERVAL = 5000;
+// Time units
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
 
+// Game constants
+const ROUND_DURATION = 60 * MINUTE;        // 1 hour
+const ROUND_NUMBER = 1;
+const MATCHMAKING_INTERVAL = 3 * MINUTE;
+const COOLDOWN_DURATION = 30 * SECOND;
+const JANITOR_INTERVAL = 5 * SECOND;
+const LOBBY_UPDATE_INTERVAL = 5 * SECOND;
 
 // Global round management variables
 let globalTimer = null;

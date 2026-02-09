@@ -2,13 +2,21 @@ import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
 
 // --- Constants ---
-const ROUND_DURATION_MS = 20 * 60 * 1000;
-const MATCH_DURATION_MS = 20 * 60 * 1000;
-const COOLDOWN_DURATION_S = 30;
-const CHALLENGE_REQUEST_EXPIRY_S = 60;
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+
+// Round 2
+const ROUND_DURATION_MS = 1.5 * HOUR;        // 90 minutes total round window
+const MATCH_DURATION_MS = 25 * MINUTE;       // 25 minutes per match
+
+const COOLDOWN_DURATION_S = 30;              // 30 seconds
+const CHALLENGE_REQUEST_EXPIRY_S = 60;       // 1 minute
+const ACTION_LOCK_MS = 1 * MINUTE;            // 1 minute
+const DISCONNECT_GRACE_PERIOD_MS = 15 * SECOND; // 15 seconds
+
 const ROLE_THRESHOLD_SCORE = 500;
-const ACTION_LOCK_MS = 1 * 60 * 1000;
-const DISCONNECT_GRACE_PERIOD_MS = 15000; // 15 seconds
+
 
 // --- Module-Scoped Variables ---
 let round2IO = null;
@@ -1180,7 +1188,7 @@ const handleRound2Reset = async (payload, callback) => {
 };
 
 // Admin functions
-export const round2AdminAddUser = async (io, userId, forceAdd = false) => {
+export const round2AdminAddUser = async (io, userId) => {
   try {
     if (!userId) {
       io.emit("admin:error", { error: "Invalid user email" });
@@ -1188,9 +1196,10 @@ export const round2AdminAddUser = async (io, userId, forceAdd = false) => {
     }
 
     const keys = getRedisKeys(userId);
+
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, username: true, eventScore: true, round2Role: true }
+      select: { id: true, username: true, eventScore: true }
     });
 
     if (!user) {
@@ -1202,19 +1211,8 @@ export const round2AdminAddUser = async (io, userId, forceAdd = false) => {
       where: { roundNumber: 2 }
     });
 
-    if (!roundDB) {
-      io.emit("admin:error", { error: "Round 2 not found" });
-      return;
-    }
-
-    if (roundDB.status === "COMPLETED") {
-      io.emit("admin:error", { error: "Round already ended" });
-      return;
-    }
-
-    // Only check IN_PROGRESS status if not forcing the add
-    if (!forceAdd && roundDB.status === "IN_PROGRESS") {
-      io.emit("admin:error", { error: "Round is in progress" });
+    if (!roundDB || roundDB.status === "COMPLETED") {
+      io.emit("admin:error", { error: "Round not active" });
       return;
     }
 
@@ -1224,19 +1222,31 @@ export const round2AdminAddUser = async (io, userId, forceAdd = false) => {
       return;
     }
 
-    const role = user.eventScore > ROLE_THRESHOLD_SCORE ? "elite" : "challenger";
+    const role =
+      user.eventScore >= ROLE_THRESHOLD_SCORE
+        ? "ELITE"
+        : "CHALLENGER";
+
+    const redisRole = role.toLowerCase();
+
     const participant = {
       id: userId,
       username: user.username,
       eventScore: user.eventScore,
-      role: role,
-      status: "lobby"
+      role: redisRole,
+      status: roundDB.status === "IN_PROGRESS" ? "idle" : "lobby"
     };
 
     await redis.hset(keys.participants, userId, JSON.stringify(participant));
-    await redis.set(keys.role(userId), role);
+    await redis.set(keys.role(userId), redisRole);
 
-    io.to(`user:${userId}`).emit("round2:adminAdded");
+    if (roundDB.status === "IN_PROGRESS") {
+      await redis.sadd(`round2:${redisRole}:online`, userId);
+      io.to(`user:${userId}`).emit("round2:dashboard:init", { role });
+    } else {
+      io.to(`user:${userId}`).emit("round2:adminAdded");
+    }
+
     io.emit("admin:success", { action: "add", userId, round: 2 });
 
   } catch (err) {
@@ -1311,6 +1321,11 @@ export const round2AdminRemoveUser = async (io, userId) => {
           disconnected: [],
         },
       },
+    });
+
+    io.to(`user:${userId}`).emit("round2:redirect", {
+      target: "dashboard",
+      reason: "removed_by_admin"
     });
 
     // Refresh lobby state for admin panels

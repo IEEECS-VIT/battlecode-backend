@@ -21,6 +21,8 @@ const router = express.Router();
 
 const JUDGE0_API_URL = process.env.JUDGE0_API_URL;
 const JUDGE0_API_KEY = null;
+const HARD_API_TIMEOUT_MS = 60_000; // 60 seconds
+const POLL_INTERVAL_MS = 1000;
 
 const LANGUAGE_ID_MAP = {
   cpp: 54,
@@ -50,14 +52,12 @@ router.post("/run", async (req, res) => {
 
     const language_id = LANGUAGE_ID_MAP[language.toLowerCase()];
     if (!language_id) {
-      return res
-        .status(400)
-        .json({ error: `Unsupported language: ${language}` });
+      return res.status(400).json({ error: `Unsupported language: ${language}` });
     }
 
     const problem = await prisma.problem.findUnique({
       where: { id: problemId },
-      select: { sampleTestCases: true, title: true },
+      select: { sampleTestCases: true },
     });
 
     if (!problem) {
@@ -72,88 +72,68 @@ router.post("/run", async (req, res) => {
       return res.status(400).json({ error: "No sample test cases found" });
     }
 
-    const httpAgent = new http.Agent();
-    const axiosConfig = {
-      httpAgent,
-      headers: JUDGE0_API_KEY ? { "X-RapidAPI-Key": JUDGE0_API_KEY } : {},
-    };
-
-    const submissions = sampleTestCases.map((testCase, idx) => ({
+    const submissions = sampleTestCases.map((tc) => ({
       language_id,
       source_code,
-      stdin: testCase.stdin || testCase.input || "",
-      expected_output: testCase.expected_output || testCase.output || "",
-      index: idx,
+      stdin: tc.stdin || tc.input || "",
+      expected_output: tc.expected_output || tc.output || "",
     }));
 
     const submissionResponse = await axios.post(
       `${JUDGE0_API_URL}/submissions/batch`,
-      { submissions },
-      axiosConfig
+      { submissions }
     );
 
-    const tokens = submissionResponse.data.map((item) => item.token);
-    let results = [];
+    const tokens = submissionResponse.data.map((s) => s.token);
+    const results = [];
     const startTime = Date.now();
-    const timeout = 15000;
 
-    while (results.length < tokens.length && Date.now() - startTime < timeout) {
+    while (results.length < tokens.length) {
+      if (Date.now() - startTime > HARD_API_TIMEOUT_MS) {
+        return res.status(200).json({
+          success: false,
+          error: "TIME_LIMIT_EXCEEDED",
+          meta: { timeoutSeconds: 60 },
+        });
+      }
+
       const pendingTokens = tokens.filter(
-        (token) => !results.some((r) => r.token === token)
+        (t) => !results.some((r) => r.token === t)
       );
 
       if (pendingTokens.length === 0) break;
 
-      const statusResponses = await Promise.all(
+      const responses = await Promise.all(
         pendingTokens.map((token) =>
           axios
-            .get(`${JUDGE0_API_URL}/submissions/${token}`, axiosConfig)
-            .catch((err) => ({ data: { token, error: err.message } }))
+            .get(`${JUDGE0_API_URL}/submissions/${token}`)
+            .catch(() => null)
         )
       );
 
-      for (const response of statusResponses) {
-        const data = response.data;
-        if (results.some((r) => r.token === data.token)) continue;
-        const statusId = data.status?.id;
-        if (statusId > 2) {
-          results.push({
-            token: data.token,
-            status: data.status,
-            stdout: data.stdout,
-            stderr: data.stderr,
-            compile_output: data.compile_output,
-            time: data.time,
-            memory: data.memory,
-            passed: data.status?.id === 3,
-          });
+      for (const r of responses) {
+        if (!r?.data) continue;
+        if (results.some((x) => x.token === r.data.token)) continue;
+        if (r.data.status?.id > 2) {
+          results.push(r.data);
         }
       }
-      if (results.length < tokens.length) await sleep(1000);
+
+      await sleep(POLL_INTERVAL_MS);
     }
 
-    if (results.length < tokens.length) {
-      console.error("⏱️ [RUN] Timeout waiting for Judge0 results");
-      return res.status(408).json({ error: "Execution timed out" });
-    }
+    const passed = results.filter((r) => r.status?.id === 3).length;
 
-    const passedCount = results.filter((r) => r.passed).length;
-    const totalCount = sampleTestCases.length;
-
-    res.status(200).json({
+    res.json({
       success: true,
       results,
-      summary: { passed: passedCount, total: totalCount },
+      summary: { passed, total: sampleTestCases.length },
     });
-  } catch (error) {
-    console.error("💥 [RUN] Error:", error.message, error.response?.data);
-    res.status(500).json({
-      error: "Failed to execute code",
-      details: error.response?.data || error.message,
-    });
+  } catch (err) {
+    console.error("[RUN ERROR]", err);
+    res.status(500).json({ error: "Run failed" });
   }
 });
-
 /**
  * POST /submit
  */
@@ -290,69 +270,61 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     console.log("✅ [SUBMIT] Judge0 batch submission created, tokens received:", submissionResponse.data?.length);
 
-    const tokens = submissionResponse.data.map((item) => item.token);
+    const tokens = submissionResponse.data.map((s) => s.token);
     let results = [];
-    const startTime = Date.now();
-    const timeout = 20000;
+    let submissionStatus = "PENDING";
 
-    while (results.length < tokens.length && Date.now() - startTime < timeout) {
+    const startTime = Date.now();
+
+    while (results.length < tokens.length) {
+      if (Date.now() - startTime > HARD_API_TIMEOUT_MS) {
+        submissionStatus = "TIME_LIMIT_EXCEEDED";
+        break;
+      }
+
       const pendingTokens = tokens.filter(
-        (token) => !results.some((r) => r.token === token)
+        (t) => !results.some((r) => r.token === t)
       );
+
       if (pendingTokens.length === 0) break;
 
-      const statusResponses = await Promise.all(
+      const responses = await Promise.all(
         pendingTokens.map((token) =>
           axios
-            .get(`${JUDGE0_API_URL}/submissions/${token}`, axiosConfig)
-            .catch((err) => ({ data: { token, error: err.message } }))
+            .get(`${JUDGE0_API_URL}/submissions/${token}`)
+            .catch(() => null)
         )
       );
 
-      for (const response of statusResponses) {
-        const data = response.data;
-        if (results.some((r) => r.token === data.token)) continue;
-        const statusId = data.status?.id;
-        if (statusId > 2) {
-          results.push({
-            token: data.token,
-            status: data.status,
-            stdout: data.stdout,
-            stderr: data.stderr,
-            compile_output: data.compile_output,
-            time: data.time,
-            memory: data.memory,
-            passed: data.status?.id === 3,
-          });
+      for (const r of responses) {
+        if (!r?.data) continue;
+        if (results.some((x) => x.token === r.data.token)) continue;
+        if (r.data.status?.id > 2) {
+          results.push(r.data);
         }
       }
-      if (results.length < tokens.length) await sleep(1000);
+
+      await sleep(POLL_INTERVAL_MS);
     }
 
-    if (results.length < tokens.length) {
-      console.error("⏱️ [SUBMIT] Timeout waiting for Judge0 results");
-      return res.status(408).json({ error: "Submission execution timed out" });
-    }
-
-    console.log("✅ [SUBMIT] All Judge0 results received");
-
-    const passedCount = results.filter((r) => r.passed).length;
+    const passedCount = results.filter((r) => r.status?.id === 3).length;
     const totalCount = allTestCases.length;
 
-    console.log("📊 [SUBMIT] Test results:", {
-      passed: passedCount,
-      total: totalCount,
-      percentage: ((passedCount / totalCount) * 100).toFixed(2) + "%"
-    });
-
-    let submissionStatus;
-    if (results.some((r) => r.compile_output))
+    /** ✅ FINAL STATUS RESOLUTION (DO NOT CHANGE ORDER) */
+    if (submissionStatus === "TIME_LIMIT_EXCEEDED") {
+      // already set
+    } else if (results.some((r) => r.compile_output)) {
       submissionStatus = "COMPILATION_ERROR";
-    else if (results.some((r) => r.stderr)) submissionStatus = "RUNTIME_ERROR";
-    else if (results.some((r) => parseFloat(r.time) > 2.0))
+    } else if (results.some((r) => r.stderr)) {
+      submissionStatus = "RUNTIME_ERROR";
+    } else if (results.some((r) => parseFloat(r.time) > 2.0)) {
       submissionStatus = "TIME_LIMIT_EXCEEDED";
-    else if (passedCount === totalCount) submissionStatus = "ACCEPTED";
-    else submissionStatus = "WRONG_ANSWER";
+    } else if (passedCount === totalCount) {
+      submissionStatus = "ACCEPTED";
+    } else {
+      submissionStatus = "WRONG_ANSWER";
+    }
+
 
     const existingSubmission = await prisma.submission.findFirst({
       where: { userId, problemId },
@@ -396,7 +368,12 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         );
 
         calculatedScore = ScoreRound1(
-          time_left, totalcases, passedcases, difficulty, win, submits
+          timeLeftInSeconds,
+          totalCount,
+          passedCount,
+          problem.difficulty,
+          isWinner,
+          executionCount
         );
 
         if (isWinner) {
