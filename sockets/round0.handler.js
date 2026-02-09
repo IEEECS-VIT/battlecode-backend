@@ -28,7 +28,7 @@ import prisma from "../config/prisma.js";
  * - round0:user:{userId} - User presence
  */
 
-const ROUND_DURATION = 60*60;
+const ROUND_DURATION = 60 * 60;
 const ROUND_NUMBER = 0;
 
 let globalRoundState = {
@@ -53,7 +53,7 @@ const initializeGlobalState = () => {
   globalRoundState.startTime = null;
   globalRoundState.participants.clear();
   globalRoundState.problems = [];
-  
+
   if (globalRoundState.timerInterval) {
     clearInterval(globalRoundState.timerInterval);
     globalRoundState.timerInterval = null;
@@ -63,24 +63,24 @@ const initializeGlobalState = () => {
 const resetRoundState = async () => {
   try {
     initializeGlobalState();
-    
+
     const keys = getRedisKeys();
     const allParticipantsRaw = await redis.hgetall(keys.lobby);
     const resetPipeline = redis.pipeline();
-    
+
     for (const [participantId, participantDataRaw] of Object.entries(allParticipantsRaw)) {
       const participantData = JSON.parse(participantDataRaw);
       participantData.status = 'lobby'; // lowercase for Redis
       resetPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
-      
+
       const userKeys = getRedisKeys(participantId);
       resetPipeline.del(userKeys.state);
       resetPipeline.del(userKeys.progress);
     }
-    
+
     resetPipeline.del(keys.problems);
     resetPipeline.del(keys.timer);
-    
+
     await resetPipeline.exec();
     return true;
   } catch (error) {
@@ -137,9 +137,9 @@ const broadcastLobbyUpdate = async (io) => {
 };
 
 export const round0Handler = (io, socket) => {
-  
+
   // UTILITY FUNCTIONS
-  
+
   const validateUser = () => {
     const userId = socket.user?.email;  // userId stores email (consistent with Round 1)
     if (!userId) {
@@ -161,7 +161,7 @@ export const round0Handler = (io, socket) => {
         if (timeRemaining <= 0) {
           clearInterval(globalRoundState.timerInterval);
           globalRoundState.isActive = false;
-          
+
           try {
             await prisma.round.update({
               where: { roundNumber: 0 },
@@ -170,7 +170,7 @@ export const round0Handler = (io, socket) => {
           } catch (error) {
             console.error('Error updating Round 0 database status to COMPLETED:', error);
           }
-          
+
           io.to('round0').emit('round0:end', {
             message: 'Round 0 has ended!',
             duration: ROUND_DURATION,
@@ -203,12 +203,12 @@ export const round0Handler = (io, socket) => {
       const keys = getRedisKeys();
       const timerRaw = await redis.get(keys.timer);
       const problemsRaw = await redis.get(keys.problems);
-      
+
       if (timerRaw && problemsRaw) {
         const startTime = parseInt(timerRaw);
         const problems = JSON.parse(problemsRaw);
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        
+
         if (elapsed < ROUND_DURATION) {
           globalRoundState.isActive = true;
           globalRoundState.startTime = startTime;
@@ -233,10 +233,10 @@ export const round0Handler = (io, socket) => {
     let userData = null;
     let participantData = null;
     let redisOperationsExecuted = false;
-    
+
     try {
-      const { userId,email, error } = validateUser();
-      
+      const { userId, email, error } = validateUser();
+
       if (error) {
         return callback?.({ success: false, error });
       }
@@ -251,9 +251,9 @@ export const round0Handler = (io, socket) => {
       }
 
       if (round0DB.status !== 'LOBBY') { // UPPERCASE check
-        return callback?.({ 
-          success: false, 
-          error: `Round 0 is not in LOBBY status. Current status: ${round0DB.status}` 
+        return callback?.({
+          success: false,
+          error: `Round 0 is not in LOBBY status. Current status: ${round0DB.status}`
         });
       }
 
@@ -298,7 +298,7 @@ export const round0Handler = (io, socket) => {
       const redisPipeline = redis.pipeline();
       redisPipeline.hset(keys.lobby, userId, JSON.stringify(participantData));
       redisPipeline.setex(`round${ROUND_NUMBER}:user:${userId}`, 3600, 'online');
-      
+
       try {
         await redisPipeline.exec();
         redisOperationsExecuted = true;
@@ -339,16 +339,16 @@ export const round0Handler = (io, socket) => {
       await broadcastLobbyUpdate(io);
 
       console.log(`User ${username} (${userId}) joined Round 0 lobby`);
-      
-      callback?.({ 
-        success: true, 
+
+      callback?.({
+        success: true,
         message: 'Successfully joined Round 0 lobby',
         participants: lobbyParticipants
       });
 
     } catch (error) {
       console.error('Error in round0:join:', error);
-      
+
       // Rollback operations if they were executed
       if (redisOperationsExecuted && participantData) {
         try {
@@ -360,12 +360,12 @@ export const round0Handler = (io, socket) => {
           console.error('Error during join rollback:', rollbackError);
         }
       }
-      
+
       // Remove from global state if it was added
       if (participantData && globalRoundState.participants.has(participantData.userId)) {
         globalRoundState.participants.delete(participantData.userId);
       }
-      
+
       callback?.({ success: false, error: 'Failed to join Round 0 lobby' });
     }
   };
@@ -378,7 +378,7 @@ export const round0Handler = (io, socket) => {
     let problems = null;
     let allParticipantsRaw = null;
     let participantsToUpdate = [];
-    
+
     try {
       const { userId, error } = validateUser();
 
@@ -397,9 +397,9 @@ export const round0Handler = (io, socket) => {
       });
 
       if (!round0DB || round0DB.status !== 'LOBBY') { // UPPERCASE check
-        return callback?.({ 
-          success: false, 
-          error: `Round 0 is not in LOBBY status. Current status: ${round0DB?.status || 'Not found'}` 
+        return callback?.({
+          success: false,
+          error: `Round 0 is not in LOBBY status. Current status: ${round0DB?.status || 'Not found'}`
         });
       }
 
@@ -450,7 +450,7 @@ export const round0Handler = (io, socket) => {
 
       // Step 4: Prepare all Redis operations for atomic execution
       const startTime = Date.now();
-      
+
       // Store problems and timer
       redisPipeline.setex(keys.problems, 3600, JSON.stringify(problems));
       redisPipeline.setex(keys.timer, 3600, startTime.toString());
@@ -460,10 +460,10 @@ export const round0Handler = (io, socket) => {
         const participantData = JSON.parse(participantDataRaw);
         participantData.status = 'in_match'; // lowercase for Redis
         participantsToUpdate.push({ participantId, participantData });
-        
+
         // Update lobby
         redisPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
-        
+
         // Initialize user state
         const userState = {
           currentProblemIndex: 0,
@@ -471,10 +471,10 @@ export const round0Handler = (io, socket) => {
           startTime: startTime,
           submissions: []
         };
-        
+
         const userKeys = getRedisKeys(participantId);
         redisPipeline.setex(userKeys.state, 3600, JSON.stringify(userState));
-        
+
         // Initialize progress
         const userProgress = {
           problemsSolved: 0,
@@ -530,7 +530,7 @@ export const round0Handler = (io, socket) => {
       globalRoundState.problems = problems;
       globalRoundState.isActive = true;
       globalRoundState.startTime = startTime;
-      
+
       // Update participants in global state
       participantsToUpdate.forEach(({ participantId, participantData }) => {
         globalRoundState.participants.set(participantId, participantData);
@@ -548,9 +548,9 @@ export const round0Handler = (io, socket) => {
       });
 
       console.log(`Round 0 started by admin ${userId} with ${problems.length} problems`);
-      
-      callback?.({ 
-        success: true, 
+
+      callback?.({
+        success: true,
         message: `Round 0 started with ${problems.length} problems`,
         problems,
         duration: ROUND_DURATION
@@ -558,49 +558,49 @@ export const round0Handler = (io, socket) => {
 
     } catch (error) {
       console.error('Error in round0:ready:', error);
-      
+
       // Rollback: Reset global state if it was modified
       if (globalRoundState.isActive) {
         globalRoundState.isActive = false;
         globalRoundState.startTime = null;
         globalRoundState.problems = [];
         globalRoundState.participants.clear();
-        
+
         // Clear timer if it was started
         if (globalRoundState.timerInterval) {
           clearInterval(globalRoundState.timerInterval);
           globalRoundState.timerInterval = null;
         }
       }
-      
+
       // Rollback: Reset participant status in Redis if they were updated
       if (participantsToUpdate.length > 0) {
         try {
           const rollbackPipeline = redis.pipeline();
           const keys = getRedisKeys();
-          
+
           participantsToUpdate.forEach(({ participantId, participantData }) => {
             // Reset status back to waiting
             participantData.status = 'waiting';
             rollbackPipeline.hset(keys.lobby, participantId, JSON.stringify(participantData));
-            
+
             // Remove user state and progress
             const userKeys = getRedisKeys(participantId);
             rollbackPipeline.del(userKeys.state);
             rollbackPipeline.del(userKeys.progress);
           });
-          
+
           // Remove problems and timer
           rollbackPipeline.del(keys.problems);
           rollbackPipeline.del(keys.timer);
-          
+
           await rollbackPipeline.exec();
           console.log('Successfully rolled back Redis state after error');
         } catch (rollbackError) {
           console.error('Error during rollback:', rollbackError);
         }
       }
-      
+
       callback?.({ success: false, error: 'Failed to start Round 0' });
     }
   };
@@ -610,10 +610,10 @@ export const round0Handler = (io, socket) => {
     let userState = null;
     let userProgress = null;
     let redisOperationsExecuted = false;
-    
+
     try {
       const { userId, error } = validateUser();
-      
+
       if (error) {
         socket.emit('round0:next:error', { success: false, error });
         return;
@@ -625,7 +625,7 @@ export const round0Handler = (io, socket) => {
       }
 
       const keys = getRedisKeys(userId);
-      
+
       // Step 1: Get and validate user's current state
       let userStateRaw;
       try {
@@ -635,7 +635,7 @@ export const round0Handler = (io, socket) => {
         socket.emit('round0:next:error', { success: false, error: 'Failed to fetch user state' });
         return;
       }
-      
+
       if (!userStateRaw) {
         socket.emit('round0:next:error', { success: false, error: 'User state not found' });
         return;
@@ -678,7 +678,7 @@ export const round0Handler = (io, socket) => {
       if (userProgress) {
         redisPipeline.setex(keys.progress, 3600, JSON.stringify(userProgress));
       }
-      
+
       try {
         await redisPipeline.exec();
         redisOperationsExecuted = true;
@@ -694,8 +694,8 @@ export const round0Handler = (io, socket) => {
 
       console.log(`User ${userId} moved to problem ${userState.currentProblemIndex + 1}`);
 
-      socket.emit('round0:next', { 
-        success: true, 
+      socket.emit('round0:next', {
+        success: true,
         problem: nextProblem,
         problemIndex: userState.currentProblemIndex,
         totalProblems: problems.length,
@@ -704,33 +704,33 @@ export const round0Handler = (io, socket) => {
 
     } catch (error) {
       console.error('Error in round0:nextQuestion:', error);
-      
+
       // Rollback: Reset user state if Redis operations were executed
       if (redisOperationsExecuted && userState) {
         try {
           const keys = getRedisKeys(socket.user?.email);
-          
+
           // Rollback user state
           const rollbackUserState = { ...userState };
           rollbackUserState.currentProblemIndex = userState.currentProblemIndex - 1; // Revert to previous index
-          
+
           const rollbackPipeline = redis.pipeline();
           rollbackPipeline.setex(keys.state, 3600, JSON.stringify(rollbackUserState));
-          
+
           // Rollback progress if it was updated
           if (userProgress) {
             const rollbackProgress = { ...userProgress };
             rollbackProgress.currentProblem = rollbackUserState.currentProblemIndex;
             rollbackPipeline.setex(keys.progress, 3600, JSON.stringify(rollbackProgress));
           }
-          
+
           await rollbackPipeline.exec();
           console.log('Successfully rolled back user state after nextQuestion error');
         } catch (rollbackError) {
           console.error('Error during nextQuestion rollback:', rollbackError);
         }
       }
-      
+
       socket.emit('round0:next:error', { success: false, error: 'Failed to get next question' });
     }
   };
@@ -742,16 +742,16 @@ export const round0Handler = (io, socket) => {
       if (!userId) return;
 
       const keys = getRedisKeys(userId);
-      
+
       // Update participant status in lobby
       const participantRaw = await redis.hget(keys.lobby, userId);
       if (participantRaw) {
         const participant = JSON.parse(participantRaw);
         participant.status = 'disconnected'; // lowercase for Redis
         participant.disconnectedAt = new Date().toISOString();
-        
+
         await redis.hset(keys.lobby, userId, JSON.stringify(participant));
-        
+
         // Update global state
         if (globalRoundState.participants.has(userId)) {
           globalRoundState.participants.set(userId, participant);
@@ -763,7 +763,7 @@ export const round0Handler = (io, socket) => {
 
       // Remove user presence
       await redis.del(`round${ROUND_NUMBER}:user:${userId}`);
-      
+
       console.log(`User ${userId} disconnected from Round 0`);
 
     } catch (error) {
@@ -789,7 +789,7 @@ export const round0Handler = (io, socket) => {
       }
 
       const keys = getRedisKeys(userId);
-      
+
       // Get user's game state
       const userStateRaw = await redis.get(keys.state);
       if (!userStateRaw) {
@@ -801,7 +801,7 @@ export const round0Handler = (io, socket) => {
       }
 
       const userState = JSON.parse(userStateRaw);
-      
+
       // Get user's progress
       const userProgressRaw = await redis.get(keys.progress);
       const userProgress = userProgressRaw ? JSON.parse(userProgressRaw) : {};
@@ -848,8 +848,8 @@ export const round0Handler = (io, socket) => {
     try {
       const validation = validateUser();
       if (validation.error) {
-        socket.emit('round0:state', { 
-          success: false, 
+        io.emit('round0:state', {
+          success: false,
           error: validation.error,
           timestamp: Date.now(),
           roundNumber: 0,
@@ -889,8 +889,8 @@ export const round0Handler = (io, socket) => {
       });
 
       if (!round0DB) {
-        socket.emit('round0:state', { 
-          success: false, 
+        io.emit('round0:state', {
+          success: false,
           error: 'Round 0 not found in database',
           timestamp: Date.now(),
           roundNumber: 0,
@@ -953,7 +953,7 @@ export const round0Handler = (io, socket) => {
       if (!globalRoundState.isActive && round0DB.status === 'IN_PROGRESS') { // UPPERCASE check
         console.log('Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
         await syncGlobalStateWithRedis();
-        
+
         // Recalculate timeRemaining after sync
         if (globalRoundState.isActive && globalRoundState.startTime) {
           const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
@@ -963,7 +963,7 @@ export const round0Handler = (io, socket) => {
 
       // If round is not active or user not in lobby, return lobby-only state
       if (round0DB.status !== 'IN_PROGRESS' || !participant) { // UPPERCASE check
-        socket.emit('round0:state', {
+        io.emit('round0:state', {
           success: true,
           timestamp: Date.now(),
           roundNumber: 0,
@@ -988,10 +988,10 @@ export const round0Handler = (io, socket) => {
 
       // Get user's match state
       const userStateRaw = await redis.get(keys.state);
-      
+
       if (!userStateRaw) {
         // User is in lobby but doesn't have match state yet
-        socket.emit('round0:state', {
+        io.emit('round0:state', {
           success: true,
           timestamp: Date.now(),
           roundNumber: 0,
@@ -1029,7 +1029,7 @@ export const round0Handler = (io, socket) => {
       timeRemaining = Math.max(ROUND_DURATION - elapsedTime, 0);
 
       // Return full match state
-      socket.emit('round0:state', {
+      io.emit('round0:state', {
         success: true,
         timestamp: Date.now(),
         roundNumber: 0,
@@ -1066,8 +1066,8 @@ export const round0Handler = (io, socket) => {
 
     } catch (error) {
       console.error('Error in round0:getState:', error);
-      socket.emit('round0:state', { 
-        success: false, 
+      io.emit('round0:state', {
+        success: false,
         error: 'Failed to get current state',
         timestamp: Date.now(),
         roundNumber: 0,
@@ -1116,17 +1116,17 @@ export const round0Handler = (io, socket) => {
   //     }
 
   //     const success = await resetRoundState();
-      
+
   //     if (success) {
   //       // Update database status back to LOBBY
   //       await prisma.round.update({
   //         where: { roundNumber: 0 },
   //         data: { status: 'LOBBY' }
   //       });
-        
+
   //       // Notify all clients about the reset
   //       io.emit('round0:reset', { message: 'Round 0 has been reset by admin' });
-        
+
   //       console.log(`Round 0 reset by admin`);
   //     }
 
@@ -1143,7 +1143,7 @@ export const round0Handler = (io, socket) => {
 
   // EVENT LISTENERS
   socket.on('round0:join', handleJoinLobby);
-  socket.on('round0:ready', handleAdminReady); 
+  socket.on('round0:ready', handleAdminReady);
   socket.on('round0:nextQuestion', handleNextQuestion);
   socket.on('round0:getState', handleGetState);
   // socket.on('round0:reset', handleReset);
@@ -1165,8 +1165,8 @@ export const round0Handler = (io, socket) => {
 };
 
 // Admin functions
-export const endRound0 = async(io) =>{
-  const keys=getRedisKeys();
+export const endRound0 = async (io) => {
+  const keys = getRedisKeys();
   console.log("--- ENDING ROUND 0 ---");
 
   initializeGlobalState();
@@ -1187,7 +1187,7 @@ export const endRound0 = async(io) =>{
     where: { roundNumber: 0 },
     data: { status: "COMPLETED" }, // UPPERCASE for database
   });
- 
+
   io.to('round0').emit('round0:ended', { message: 'Round 0 has ended!' });
 
   await broadcastLobbyUpdate(io);
@@ -1259,10 +1259,10 @@ export const round0AdminAddUser = async (io, userId, forceAdd = false) => {
 
       const lobbyKeys = getRedisKeys();
       const problemsRaw = await redis.get(lobbyKeys.problems);
-      
+
       if (problemsRaw && globalRoundState.startTime) {
         const problems = JSON.parse(problemsRaw);
-        
+
         // Initialize user state
         const userState = {
           currentProblemIndex: 0,
@@ -1270,9 +1270,9 @@ export const round0AdminAddUser = async (io, userId, forceAdd = false) => {
           startTime: globalRoundState.startTime,
           submissions: []
         };
-        
+
         await redis.setex(keys.state, 3600, JSON.stringify(userState));
-        
+
         // Initialize progress
         const userProgress = {
           problemsSolved: 0,
@@ -1280,9 +1280,9 @@ export const round0AdminAddUser = async (io, userId, forceAdd = false) => {
           score: 0,
           lastActivity: new Date().toISOString()
         };
-        
+
         await redis.setex(keys.progress, 3600, JSON.stringify(userProgress));
-        
+
         console.log(`Initialized game state for user ${userId} added during IN_PROGRESS`);
       } else {
         console.warn(`Cannot initialize game state for user ${userId}: problems=${!!problemsRaw}, startTime=${!!globalRoundState.startTime}`);
@@ -1308,7 +1308,7 @@ export const round0AdminRemoveUser = async (io, userId) => {
   try {
     const keys = getRedisKeys(userId);
     const participantStr = await redis.hget(keys.lobby, userId);
-    
+
     if (!participantStr) {
       io.emit("admin:error", { error: "User not in round" });
       return;
