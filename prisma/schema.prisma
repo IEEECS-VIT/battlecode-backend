@@ -17,6 +17,7 @@ model User {
   eventScore       Int              @default(0)
   currentRound     Int              @default(0)
   round2Role       Round2Role?
+  qualifiedForR3   Boolean          @default(false)
   hackAttempts     HackAttempt[]    @relation("HackerAttempts")
   hackedAttempts   HackAttempt[]    @relation("TargetAttempts")
   lockedSolutions  LockedSolution[]
@@ -148,11 +149,11 @@ enum Round2Role {
 enum SubmissionStatus {
   PENDING
   ACCEPTED
-  LOCKED
   WRONG_ANSWER
   TIME_LIMIT_EXCEEDED
   COMPILATION_ERROR
   RUNTIME_ERROR
+  LOCKED
 }
 
 enum HackStatus {

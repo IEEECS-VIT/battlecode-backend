@@ -215,9 +215,27 @@ export const round3Handler = (io, socket) => {
       if (roundDB?.status !== 'LOBBY') {
         return callback?.({ success: false, error: `Round is not in lobby state. Current: ${roundDB?.status}` });
       }
-      const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, username: true, role: true } });
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          username: true,
+          qualifiedForR3: true
+        }
+      });
+
+      if (!user?.qualifiedForR3) {
+        return callback?.({
+          success: false,
+          error: "You are not qualified for Round 3"
+        });
+      }
       if (!user) return callback?.({ success: false, error: 'User not found.' });
       const participantData = { userId: user.id, username: user.username, status: 'lobby' }; // lowercase for Redis
+      const exists = await redis.hget(getRedisKeys().lobby, userId);
+        if (exists) {
+          return callback?.({ success: true, message: 'Already in lobby' });
+        }
       await redis.hset(getRedisKeys().lobby, userId, JSON.stringify(participantData));
       socket.join(`round${ROUND_NUMBER}`);
       await broadcastLobbyUpdate();
@@ -503,6 +521,19 @@ export const round3Handler = (io, socket) => {
       }
       const { userId } = validation;
 
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { qualifiedForR3: true }
+      });
+
+      if (!user?.qualifiedForR3) {
+        socket.emit('round3:state', {
+          success: false,
+          error: 'You are not qualified for Round 3'
+        });
+        return;
+      }
+
       // Join socket rooms
       socket.join(`round${ROUND_NUMBER}`);
       socket.join(`user:${userId}`);
@@ -744,8 +775,18 @@ export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
     const keys = getRedisKeys();
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, username: true, eventScore: true }
+      select: {
+        id: true,
+        username: true,
+        qualifiedForR3: true
+      }
     });
+
+    if (!user?.qualifiedForR3) {
+      io.to(`user:${userId}`).emit("round3:notQualified");
+      io.emit("admin:error", { error: "User is not qualified for Round 3" });
+      return;
+    } 
 
     if (!user) {
       io.emit("admin:error", { error: "User not found" });
@@ -787,13 +828,8 @@ export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
       joinedAt: new Date().toISOString()
     };
 
-    if (roundDB.status === 'IN_PROGRESS') {
-      // 🔑 Add directly to participants, NOT lobby
-      await redis.hset(keys.participants, userId, JSON.stringify(participant));
-    } else {
-      await redis.hset(keys.lobby, userId, JSON.stringify(participant));
-    }
-
+    await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    await broadcastLobbyUpdate();
     io.to(`user:${userId}`).emit("round3:state", {
       success: true,
       roundNumber: 3,

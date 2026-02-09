@@ -81,6 +81,14 @@ export const adminHandler = (io, socket) => {
       }
     }
   };
+  
+  socket.on("admin:qualifyRound3", (payload, callback) => {
+    if (socket.user.role !== 'ADMIN') {
+      return callback?.({ success: false, error: 'Unauthorized' });
+    }
+
+    handleQualifyRound3(io, payload, callback);
+  });
 
   socket.on('admin:adduser', async ({ user, round }, callback) => {
     if (socket.user.role !== 'ADMIN') {
@@ -258,5 +266,50 @@ export const adminHandler = (io, socket) => {
   }
 
 };
+
+export const handleQualifyRound3 = async (io, payload, callback) => {
+  try {
+    const { count } = payload;
+
+    if (!count || count <= 0) {
+      return callback?.({ success: false, error: "Invalid count" });
+    }
+
+    // 1. Fetch users by leaderboard
+    const users = await prisma.user.findMany({
+      where: {
+        role: 'PLAYER',
+      },
+      orderBy: { eventScore: "desc" },
+      select: { id: true }
+    });
+
+    const qualifiedIds = users.slice(0, count).map(u => u.id);
+    const disqualifiedIds = users.slice(count).map(u => u.id);
+
+    // 2. Update DB
+    await prisma.$transaction([
+      prisma.user.updateMany({
+        where: { id: { in: qualifiedIds } },
+        data: { qualifiedForR3: true }
+      }),
+      prisma.user.updateMany({
+        where: { id: { in: disqualifiedIds } },
+        data: { qualifiedForR3: false }
+      })
+    ]);
+
+    // 3. Notify admin + users
+    io.emit("admin:qualificationUpdated", {
+      qualifiedCount: qualifiedIds.length
+    });
+
+    callback?.({ success: true });
+  } catch (err) {
+    console.error("[ADMIN] Qualify R3 error:", err);
+    callback?.({ success: false, error: "Server error" });
+  }
+};
+
 
   
