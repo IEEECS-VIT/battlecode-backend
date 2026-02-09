@@ -1,6 +1,6 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-
+import { broadcastLeaderboard } from "./global.handler.js";
 
 // Constants
 const ROUND_DURATION = 60 * 60 * 1000;
@@ -312,7 +312,6 @@ export const handleMatchEnd = async (io,matchId, winnerId, force_end = false) =>
         });
         const scoreMap = new Map(playersFromDb.map(p => [p.id, p.eventScore]));
 
-
         for (const playerId of match.players) {
             const playerStr = await redis.hget(keys.participants, playerId);
             if (!playerStr) continue;
@@ -327,6 +326,7 @@ export const handleMatchEnd = async (io,matchId, winnerId, force_end = false) =>
             io.to(`user:${playerId}`).emit('round1:matchEnd', { type: force_end? 'admin_end': (winnerId ? (playerId === winnerId ? 'win' : 'lose') : 'timeout') });
             io.to(`user:${playerId}`).emit('round1:cooldown', { cooldownEndTime: player.cooldownEndTime });
         }
+        await broadcastLeaderboard(io);
     };
 
 
@@ -482,6 +482,7 @@ export const handleMatchForfeit = async (io, forfeitingUserId) => {
       type: 'lose',
       reason: 'ADMIN_FORFEIT',
     });
+    await broadcastLeaderboard(io);
 
     // 7️⃣ Update lobby
     await broadcastLobbyUpdate(io);
@@ -900,6 +901,7 @@ const runMatchmakingCycle = async () => {
             if (!userData) return callback?.({ success: false, error: 'User not found.' });
             
             const userRank = (await prisma.user.count({ where: { eventScore: { gt: userData.eventScore || 0 } }})) + 1;
+            await broadcastLeaderboard(io);
             
             const newParticipant = {
                 id: userId,

@@ -269,6 +269,8 @@ export const round2Handler = (io, socket) => {
           }
       }
 
+      await broadcastLeaderboard(io);
+
       // --- FIX: Update roles FIRST, before emitting the event ---
       const [winnerUpdate, loserUpdate] = await Promise.all([updatePlayerRole(winnerId), updatePlayerRole(loserId)]);
 
@@ -992,6 +994,7 @@ const question = questions[Math.floor(Math.random() * questions.length)];
             io.to(`user:${eliteId}`).emit('round2:info', { message: "You lost 20 points for rejecting 3 challenges." });
         }
 
+        await broadcastLeaderboard(io);
         io.to(`user:${challengerId}`).emit("round2:challengeRejected", { eliteId });
         callback?.({ success: true, message: "Challenge rejected." });
         await broadcastDashboardUpdates();

@@ -92,6 +92,24 @@ bootstrapSocket();
   const handleLeaderboardRequest = async (payload, callback) => {
     console.log(`handleLeaderboardRequest called for user: ${socket.user.email}`);
     try {
+      const { currentRoundNumber, currentRoundStatus } = await getCurrentRound();
+
+    if (
+      currentRoundNumber === 3 &&
+      currentRoundStatus !== 'LOCKED'
+    ) {
+      return callback?.({
+        success: false,
+        error: "Leaderboard is locked"
+      });
+    }
+
+    if (currentRoundNumber > 3) {
+      return callback?.({
+        success: false,
+        error: "Leaderboard is no longer available"
+      });
+    }
       const leaderboard = await getLeaderboard();
       
       console.log(`Sending leaderboard data:`, leaderboard);
@@ -254,11 +272,58 @@ const getLeaderboard = async () => {
   }
 };
 
+socket.on("global:violation", handleGlobalViolation);
 
+const handleGlobalViolation = async (payload, callback) => {
 
+  const currentRound = await prisma.round.findFirst({
+    where: {
+      status: 'IN_PROGRESS',
+    },
+  });
+  console.log(`handling violation for round ${currentRound}`);
+  console.log(`user:  ${payload?.userId} has violated 5 times`);
+
+  if (!currentRound) {
+    if (callback) {
+      callback({ success: false, error: "No round in progress" });
+    }
+    return;
+  }
+  else if (curentRound === 0) {
+    await handleRound0Violation(payload, callback);
+  }
+  else if (currentRound.roundNumber === 1) {
+    await handleRound1Violation(payload, callback);
+  }
+  else if (currentRound.roundNumber === 2) {
+    await handleRound2Violation(payload, callback);
+  }
+  else if (currentRound.roundNumber === 3) {
+    await handleRound3Violation(payload, callback);
+  }
+  else {
+    if (callback) {
+      callback({ success: false, error: "No round in progress" });
+    }
+    return;
+  }
+}
 
 const broadcastLeaderboard = async (io) => {
   try {
+    const {
+      currentRoundNumber,
+      currentRoundStatus
+    } = await getCurrentRound();
+
+    if (currentRoundNumber === 3 && currentRoundStatus !== 'LOCKED') {
+      return;
+    }
+
+    if (currentRoundNumber > 3) {
+      return;
+    }
     const leaderboard = await getLeaderboard();
     if (leaderboard.length > 0) {
       io.emit("server:leaderboard", { leaderboard });
