@@ -10,7 +10,6 @@ import {
   ScoreRound2,
   ScoreBounty,
   ScoreRound3,
-  ScoreCC
 } from "../utils/calculateScore.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
 import { handleMatchEnd } from "../sockets/round1.handler.js";
@@ -280,9 +279,9 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       expected_output: testCase.expected_output || testCase.output || "",
       index: idx,
     }));
-    
+
     console.log("🔄 [SUBMIT] Sending to Judge0:", JUDGE0_API_URL);
-    
+
     const submissionResponse = await axios.post(
       `${JUDGE0_API_URL}/submissions/batch`,
       { submissions },
@@ -401,7 +400,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
         );
 
         if (isWinner) {
-          await handleMatchEnd(io,activeMatch.id,   isWinner ? userId : null);
+          await handleMatchEnd(io, activeMatch.id, isWinner ? userId : null);
         }
       } else {
         console.warn(`[Round 1] No active match found for user ${userId}`);
@@ -523,7 +522,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       });
 
       await broadcastLeaderboard(io);
-      
+
       console.log("✅ [SUBMIT] User score updated. Improvement:", scoreImprovement);
     } else {
       console.log("ℹ️ [SUBMIT] No score improvement. Current score:", calculatedScore, "Previous best:", existingSubmission?.score || 0);

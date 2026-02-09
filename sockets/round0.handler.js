@@ -1146,6 +1146,15 @@ export const round0Handler = (io, socket) => {
   socket.on('round0:ready', handleAdminReady);
   socket.on('round0:nextQuestion', handleNextQuestion);
   socket.on('round0:getState', handleGetState);
+  socket.on('round0:violation', async () => {
+    const { userId, error } = validateUser();
+    if (error) return;
+
+    await handleRound0Violation(userId);
+  });
+
+
+
   // socket.on('round0:reset', handleReset);
   socket.on('disconnect', handleDisconnect);
 
@@ -1361,6 +1370,45 @@ export const getRound0Status = async () => {
       timeRemaining: 0,
       duration: ROUND_DURATION
     };
+  }
+};
+
+
+export const handleRound0Violation = async (io, userId) => {
+  const keys = getRedisKeys(userId);
+
+  try {
+    // 1️⃣ Remove active game state
+    await redis.del(keys.state);
+    await redis.del(keys.progress);
+
+    // 2️⃣ Update lobby participant
+    const participantRaw = await redis.hget(keys.lobby, userId);
+    if (!participantRaw) return;
+
+    const participant = JSON.parse(participantRaw);
+    participant.status = 'finished';
+    participant.finishedAt = new Date().toISOString();
+    participant.reason = 'VIOLATION';
+
+    await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+
+    // 3️⃣ Remove from in-memory participants
+    globalRoundState.participants.delete(userId);
+
+    // 4️⃣ Notify user
+    io.to(`user:${userId}`).emit('round0:violation', {
+      success: false,
+      message: 'You have been disqualified due to a violation.'
+    });
+
+    // 5️⃣ Update lobby
+    await broadcastLobbyUpdate(io);
+
+    console.warn(`[Round 0 Violation] User ${userId} disqualified`);
+
+  } catch (err) {
+    console.error('[Round 0 Violation Error]', err);
   }
 };
 

@@ -48,7 +48,7 @@ const resetRoundState = async () => {
   try {
     initializeGlobalState();
     const keys = getRedisKeys();
-    await redis.del(keys.lobby,keys.state, keys.timer, keys.problems);
+    await redis.del(keys.lobby, keys.state, keys.timer, keys.problems);
     console.log(`[ROUND 3] All Redis keys for Round 3 have been cleared.`);
     return true;
   } catch (error) {
@@ -61,12 +61,12 @@ const resetRoundState = async () => {
 initializeGlobalState();
 
 export const round3Handler = (io, socket) => {
-  
+
   // ## UTILITY FUNCTIONS
 
   const validateUser = () => {
     // Assumes your auth middleware adds a `user` object with an `email` or `id` to the socket
-    const userId = socket.user?.email 
+    const userId = socket.user?.email
     if (!userId) {
       return { error: 'Unauthorized - No user ID' };
     }
@@ -108,7 +108,7 @@ export const round3Handler = (io, socket) => {
         success: true,
         timestamp: Date.now(),
         roundNumber: ROUND_NUMBER,
-        
+
         round: {
           isActive: globalRoundState.isActive,
           status: round3DB?.status || 'LOBBY',
@@ -117,13 +117,13 @@ export const round3Handler = (io, socket) => {
           timeRemaining,
           duration: ROUND_DURATION
         },
-        
+
         participants: {
           total: lobbyParticipants.length,
           byStatus,
           all: lobbyParticipants
         },
-        
+
         roundSpecific: {
           isHackingPhase: globalRoundState.isHackingPhase
         }
@@ -143,20 +143,20 @@ export const round3Handler = (io, socket) => {
         const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
         const timeRemaining = ROUND_DURATION - elapsed;
 
-          if (
-              elapsed >= HACKING_PHASE_START_AFTER_SECONDS &&
-              !globalRoundState.isHackingPhase
-            ) {
-              globalRoundState.isHackingPhase = true;
+        if (
+          elapsed >= HACKING_PHASE_START_AFTER_SECONDS &&
+          !globalRoundState.isHackingPhase
+        ) {
+          globalRoundState.isHackingPhase = true;
 
-              console.log('[ROUND 3] Hacking phase has started!');
-              io.to(`round${ROUND_NUMBER}`).emit('round3:hackingPhaseStart', {
-                message: 'Hacking phase has begun!',
-                elapsed,
-              });
-            }
+          console.log('[ROUND 3] Hacking phase has started!');
+          io.to(`round${ROUND_NUMBER}`).emit('round3:hackingPhaseStart', {
+            message: 'Hacking phase has begun!',
+            elapsed,
+          });
+        }
 
-        
+
         if (timeRemaining <= 0) {
           clearInterval(globalRoundState.timerInterval);
           globalRoundState.isActive = false;
@@ -172,7 +172,7 @@ export const round3Handler = (io, socket) => {
       }
     }, 1000);
   };
-  
+
   const syncGlobalStateWithRedis = async () => {
     try {
       const keys = getRedisKeys();
@@ -187,13 +187,13 @@ export const round3Handler = (io, socket) => {
             globalRoundState.isActive = true;
             globalRoundState.startTime = startTime;
             globalRoundState.problems = JSON.parse(problemsRaw);
-            globalRoundState.isHackingPhase =elapsed >= HACKING_PHASE_START_AFTER_SECONDS;
+            globalRoundState.isHackingPhase = elapsed >= HACKING_PHASE_START_AFTER_SECONDS;
             startGlobalTimer(io);
             console.log('[ROUND 3] Synced active round state from Redis.');
           } else {
-            await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' }});
+            await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
             await redis.set(keys.state, 'COMPLETED');
-            
+
             initializeGlobalState();
           }
         }
@@ -211,7 +211,7 @@ export const round3Handler = (io, socket) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
     try {
-      const roundDB = await prisma.round.findUnique({ where: { roundNumber: ROUND_NUMBER }});
+      const roundDB = await prisma.round.findUnique({ where: { roundNumber: ROUND_NUMBER } });
       if (roundDB?.status !== 'LOBBY') {
         return callback?.({ success: false, error: `Round is not in lobby state. Current: ${roundDB?.status}` });
       }
@@ -233,9 +233,9 @@ export const round3Handler = (io, socket) => {
       if (!user) return callback?.({ success: false, error: 'User not found.' });
       const participantData = { userId: user.id, username: user.username, status: 'lobby' }; // lowercase for Redis
       const exists = await redis.hget(getRedisKeys().lobby, userId);
-        if (exists) {
-          return callback?.({ success: true, message: 'Already in lobby' });
-        }
+      if (exists) {
+        return callback?.({ success: true, message: 'Already in lobby' });
+      }
       await redis.hset(getRedisKeys().lobby, userId, JSON.stringify(participantData));
       socket.join(`round${ROUND_NUMBER}`);
       await broadcastLobbyUpdate();
@@ -257,14 +257,14 @@ export const round3Handler = (io, socket) => {
       if (!user) {
         return callback?.({ success: false, error: 'User not found.' });
       }
-      
+
       // Bypassing admin check for testing as per the frontend's "Testing Mode"
-      
+
       if (user?.role !== 'ADMIN') {
         return callback?.({ success: false, error: 'Unauthorized: Not an admin.' });
       }
-    
-      
+
+
       if (globalRoundState.isActive) {
         return callback?.({ success: false, error: 'Round is already active.' });
       }
@@ -283,25 +283,25 @@ export const round3Handler = (io, socket) => {
 
       const startTime = Date.now();
       const keys = getRedisKeys();
-      
+
       // Update all participants to 'in_match' status
       const allParticipantsRaw = await redis.hgetall(keys.lobby);
       const updatePromises = [];
-      
+
       for (const [uid, dataStr] of Object.entries(allParticipantsRaw)) {
         const participantData = JSON.parse(dataStr);
         participantData.status = 'in_match'; // Update status to in_match
         updatePromises.push(redis.hset(keys.lobby, uid, JSON.stringify(participantData)));
       }
-      
+
       await Promise.all(updatePromises);
-      
+
       const redisPipeline = redis.pipeline();
       redisPipeline.set(keys.state, 'IN_PROGRESS');
       redisPipeline.set(keys.timer, startTime);
       redisPipeline.set(keys.problems, JSON.stringify(problems));
       await redisPipeline.exec();
-      
+
       await prisma.round.update({
         where: { roundNumber: ROUND_NUMBER },
         data: { status: 'IN_PROGRESS' },
@@ -317,7 +317,7 @@ export const round3Handler = (io, socket) => {
         startTime,
         duration: ROUND_DURATION,
       });
-      
+
       // Broadcast updated lobby state with participants now in 'in_match'
       await broadcastLobbyUpdate();
 
@@ -341,11 +341,11 @@ export const round3Handler = (io, socket) => {
         return callback?.({ success: false, error: 'Hacking phase is not active yet.' });
       }
       const acceptedSubmission = await prisma.submission.findFirst({
-        where: { 
-          userId, 
-          problemId: questionId, 
+        where: {
+          userId,
+          problemId: questionId,
           roundId: ROUND_NUMBER,
-          status: SubmissionStatus.ACCEPTED 
+          status: SubmissionStatus.ACCEPTED
         },
       });
       if (!acceptedSubmission) {
@@ -354,28 +354,28 @@ export const round3Handler = (io, socket) => {
       const existingLock = await prisma.lockedSolution.findUnique({
         where: { userId_questionId: { userId, questionId } },
       });
-      
+
       // Always update the user's submission status from ACCEPTED to LOCKED
       await prisma.submission.updateMany({
-        where: { 
-          userId, 
-          problemId: questionId, 
+        where: {
+          userId,
+          problemId: questionId,
           roundId: ROUND_NUMBER,
-          status: SubmissionStatus.ACCEPTED 
+          status: SubmissionStatus.ACCEPTED
         },
         data: { status: SubmissionStatus.LOCKED }
       });
-      
+
       if (!existingLock) {
         await prisma.lockedSolution.create({ data: { userId, questionId } });
       }
-      
+
       // Fetch other users' LOCKED submissions (not ACCEPTED)
       const otherSubmissions = await prisma.submission.findMany({
-        where: { 
-          problemId: questionId, 
+        where: {
+          problemId: questionId,
           status: SubmissionStatus.LOCKED,
-          NOT: { userId: userId } 
+          NOT: { userId: userId }
         },
         orderBy: { createdAt: 'desc' },
         distinct: ['userId'],
@@ -393,7 +393,7 @@ export const round3Handler = (io, socket) => {
   const handleGetLockedSubmissions = async (payload, callback) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
-    
+
     const { questionId } = payload;
     if (!questionId) return callback?.({ success: false, error: 'Question ID is required.' });
 
@@ -402,14 +402,14 @@ export const round3Handler = (io, socket) => {
       const userLock = await prisma.lockedSolution.findUnique({
         where: { userId_questionId: { userId, questionId } },
       });
-      
+
       if (!userLock) {
         return callback?.({ success: false, error: 'You have not locked this question.' });
       }
 
       // Fetch ALL LOCKED submissions from other users
       const otherSubmissions = await prisma.submission.findMany({
-        where: { 
+        where: {
           problemId: questionId,
           roundId: ROUND_NUMBER,
           status: SubmissionStatus.LOCKED,
@@ -417,20 +417,20 @@ export const round3Handler = (io, socket) => {
         },
         orderBy: { createdAt: 'desc' },
         distinct: ['userId'],
-        select: { 
-          userId: true, 
-          code: true, 
-          language: true, 
-          user: { select: { username: true } } 
+        select: {
+          userId: true,
+          code: true,
+          language: true,
+          user: { select: { username: true } }
         }
       });
 
-      callback?.({ 
-        success: true, 
+      callback?.({
+        success: true,
         questionId,
-        submissions: otherSubmissions 
+        submissions: otherSubmissions
       });
-      
+
     } catch (err) {
       console.error(`[ROUND 3] Error fetching locked submissions for question ${questionId}:`, err);
       callback?.({ success: false, error: 'Server error while fetching submissions.' });
@@ -447,42 +447,42 @@ export const round3Handler = (io, socket) => {
     }
 
     try {
-        if (!globalRoundState.isHackingPhase) {
-            return callback?.({ success: false, message: 'Hacking phase is not active.' });
-        }
-        const hackerLock = await prisma.lockedSolution.findUnique({
-            where: { userId_questionId: { userId: hackerId, questionId: questionId } },
-        });
-        if (!hackerLock) {
-            return callback?.({ success: false, message: 'You must lock a question before hacking it.' });
-        }
+      if (!globalRoundState.isHackingPhase) {
+        return callback?.({ success: false, message: 'Hacking phase is not active.' });
+      }
+      const hackerLock = await prisma.lockedSolution.findUnique({
+        where: { userId_questionId: { userId: hackerId, questionId: questionId } },
+      });
+      if (!hackerLock) {
+        return callback?.({ success: false, message: 'You must lock a question before hacking it.' });
+      }
 
-        const existingAttempt = await prisma.hackAttempt.findFirst({
-            where: {
-                hackerId: hackerId,
-                targetId: targetUserId,
-                questionId: questionId,
-            }
-        });
-
-        if (existingAttempt) {
-            return callback?.({ success: false, message: 'Already attempted hack.' });
+      const existingAttempt = await prisma.hackAttempt.findFirst({
+        where: {
+          hackerId: hackerId,
+          targetId: targetUserId,
+          questionId: questionId,
         }
+      });
 
-        await prisma.hackAttempt.create({
-            data: {
-                hackerId: hackerId,
-                targetId: targetUserId,
-                questionId: questionId,
-                customInput: customInput,
-            },
-        });
-        
-        return callback?.({ success: true, message: 'Hack submitted.' });
+      if (existingAttempt) {
+        return callback?.({ success: false, message: 'Already attempted hack.' });
+      }
+
+      await prisma.hackAttempt.create({
+        data: {
+          hackerId: hackerId,
+          targetId: targetUserId,
+          questionId: questionId,
+          customInput: customInput,
+        },
+      });
+
+      return callback?.({ success: true, message: 'Hack submitted.' });
 
     } catch (err) {
-        console.error(`[ROUND 3] Error submitting hack by ${hackerId}:`, err);
-        callback?.({ success: false, error: 'A server error occurred while submitting the hack.' });
+      console.error(`[ROUND 3] Error submitting hack by ${hackerId}:`, err);
+      callback?.({ success: false, error: 'A server error occurred while submitting the hack.' });
     }
   };
 
@@ -490,8 +490,8 @@ export const round3Handler = (io, socket) => {
     try {
       const validation = validateUser();
       if (validation.error) {
-        socket.emit('round3:state', { 
-          success: false, 
+        socket.emit('round3:state', {
+          success: false,
           error: validation.error,
           timestamp: Date.now(),
           roundNumber: ROUND_NUMBER,
@@ -544,8 +544,8 @@ export const round3Handler = (io, socket) => {
       });
 
       if (!round3DB) {
-        socket.emit('round3:state', { 
-          success: false, 
+        socket.emit('round3:state', {
+          success: false,
           error: 'Round 3 not found in database',
           timestamp: Date.now(),
           roundNumber: ROUND_NUMBER,
@@ -607,7 +607,7 @@ export const round3Handler = (io, socket) => {
       if (!globalRoundState.isActive && round3DB.status === 'IN_PROGRESS') {
         console.log('[ROUND 3] Database shows IN_PROGRESS but in-memory state shows inactive. Syncing...');
         await syncGlobalStateWithRedis();
-        
+
         // Recalculate timeRemaining after sync
         if (globalRoundState.isActive && globalRoundState.startTime) {
           const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
@@ -616,9 +616,9 @@ export const round3Handler = (io, socket) => {
       }
 
       // Get user's locked questions
-      const locked = await prisma.lockedSolution.findMany({ 
-        where: { userId }, 
-        select: { questionId: true } 
+      const locked = await prisma.lockedSolution.findMany({
+        where: { userId },
+        select: { questionId: true }
       });
       const lockedQuestionIds = locked.map(l => l.questionId);
 
@@ -627,7 +627,7 @@ export const round3Handler = (io, socket) => {
         success: true,
         timestamp: Date.now(),
         roundNumber: ROUND_NUMBER,
-        
+
         round: {
           isActive: globalRoundState.isActive,
           status: round3DB.status,
@@ -636,26 +636,26 @@ export const round3Handler = (io, socket) => {
           timeRemaining,
           duration: ROUND_DURATION
         },
-        
+
         participants: {
           total: allParticipants.length,
           byStatus,
           all: allParticipants
         },
-        
+
         currentUser: participant,
-        
+
         roundSpecific: {
           lockedQuestionIds,
           questions: globalRoundState.problems,
           isHackingPhase: globalRoundState.isHackingPhase
         },
-        
-        message: round3DB.status === 'LOBBY' 
-          ? 'Round not started yet' 
-          : round3DB.status === 'COMPLETED' 
-            ? 'Round ended' 
-            : globalRoundState.isHackingPhase 
+
+        message: round3DB.status === 'LOBBY'
+          ? 'Round not started yet'
+          : round3DB.status === 'COMPLETED'
+            ? 'Round ended'
+            : globalRoundState.isHackingPhase
               ? 'Hacking phase active'
               : 'Round in progress'
       };
@@ -664,8 +664,8 @@ export const round3Handler = (io, socket) => {
 
     } catch (err) {
       console.error('[ROUND 3] Error getting state:', err);
-      socket.emit('round3:state', { 
-        success: false, 
+      socket.emit('round3:state', {
+        success: false,
         error: 'Failed to retrieve state.',
         timestamp: Date.now(),
         roundNumber: ROUND_NUMBER,
@@ -693,12 +693,12 @@ export const round3Handler = (io, socket) => {
       });
     }
   };
-  
+
   const handleReset = async (payload, callback) => {
     const { userId, error } = validateUser();
     if (error) return callback?.({ success: false, error });
     try {
-      const admin = await prisma.user.findUnique({ where: { id: userId }});
+      const admin = await prisma.user.findUnique({ where: { id: userId } });
       if (admin?.role !== 'ADMIN') {
         return callback?.({ success: false, error: 'Unauthorized.' });
       }
@@ -718,22 +718,22 @@ export const round3Handler = (io, socket) => {
       callback?.({ success: false, error: 'Server error during reset.' });
     }
   };
-  
+
   const handleDisconnect = async () => {
     const { userId, error } = validateUser();
     if (error) return;
     try {
-        const keys = getRedisKeys();
-        if(await redis.hget(keys.lobby, userId)) {
-            await redis.hdel(keys.lobby, userId);
-            await broadcastLobbyUpdate();
-            console.log(`[ROUND 3] User ${userId} disconnected and was removed from the lobby.`);
-        }
-    } catch(err) {
-        console.error(`[ROUND 3] Error during disconnect for user ${userId}:`, err);
+      const keys = getRedisKeys();
+      if (await redis.hget(keys.lobby, userId)) {
+        await redis.hdel(keys.lobby, userId);
+        await broadcastLobbyUpdate();
+        console.log(`[ROUND 3] User ${userId} disconnected and was removed from the lobby.`);
+      }
+    } catch (err) {
+      console.error(`[ROUND 3] Error during disconnect for user ${userId}:`, err);
     }
   };
-  
+
   // ## EVENT LISTENERS
 
   socket.on('round3:join', handleJoinLobby);
@@ -754,14 +754,14 @@ export const round3Handler = (io, socket) => {
 // ## EXPORTED FUNCTIONS
 
 export const emitHackResult = (io, result) => {
-    const { hackerId, targetId, questionId, status } = result;
-    const eventName = status === 'SUCCESSFUL' ? 'round3:hackSuccessful' : 'round3:hackFailed';
-    const payload = { questionId, hackerId, targetId, message: `Your hack attempt against user ${targetId} was ${status.toLowerCase()}.` };
-    io.to(hackerId).emit(eventName, payload);
-    if(status === 'SUCCESSFUL') {
-        const victimPayload = { ...payload, message: `Your solution for question ${questionId} was successfully hacked by ${hackerId}!` };
-        io.to(targetId).emit('round3:hacked', victimPayload);
-    }
+  const { hackerId, targetId, questionId, status } = result;
+  const eventName = status === 'SUCCESSFUL' ? 'round3:hackSuccessful' : 'round3:hackFailed';
+  const payload = { questionId, hackerId, targetId, message: `Your hack attempt against user ${targetId} was ${status.toLowerCase()}.` };
+  io.to(hackerId).emit(eventName, payload);
+  if (status === 'SUCCESSFUL') {
+    const victimPayload = { ...payload, message: `Your solution for question ${questionId} was successfully hacked by ${hackerId}!` };
+    io.to(targetId).emit('round3:hacked', victimPayload);
+  }
 };
 
 // Admin functions
@@ -786,7 +786,7 @@ export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
       io.to(`user:${userId}`).emit("round3:notQualified");
       io.emit("admin:error", { error: "User is not qualified for Round 3" });
       return;
-    } 
+    }
 
     if (!user) {
       io.emit("admin:error", { error: "User not found" });
@@ -859,7 +859,7 @@ export const round3AdminRemoveUser = async (io, userId) => {
   try {
     const keys = getRedisKeys();
     const participantStr = await redis.hget(keys.lobby, userId);
-    
+
     if (!participantStr) {
       io.emit("admin:error", { error: "User not in round" });
       return;
@@ -867,7 +867,7 @@ export const round3AdminRemoveUser = async (io, userId) => {
 
     // Clean up user data
     await redis.hdel(keys.lobby, userId);
-    
+
     // Delete user-specific submissions and hack data if needed
     const userStateKey = `round${ROUND_NUMBER}:user:${userId}:state`;
     await redis.del(userStateKey);
@@ -878,9 +878,10 @@ export const round3AdminRemoveUser = async (io, userId) => {
     const allParticipantsStr = await redis.hgetall(keys.lobby);
     const allParticipants = Object.values(allParticipantsStr).map(p => JSON.parse(p));
     const isRoundActive = allParticipants.length > 0;
-    
-    io.emit('lobby:round3', { 
-      participants: allParticipants   });
+
+    io.emit('lobby:round3', {
+      participants: allParticipants
+    });
 
     io.emit("admin:success", { action: "remove", userId, round: ROUND_NUMBER });
 
@@ -938,3 +939,41 @@ export const endRound3 = async (io) => {
     throw error;
   }
 };
+
+export const handleRound3Violation = async (payload) => {
+  const { userId, error } = validateUser();
+  if (error) return;
+
+  try {
+    const keys = getRedisKeys();
+
+    console.warn(`[ROUND 3 VIOLATION] User ${userId} violated rules`);
+
+    // 1️⃣ Update participant status in lobby
+    const participantRaw = await redis.hget(keys.lobby, userId);
+    if (participantRaw) {
+      const participant = JSON.parse(participantRaw);
+      participant.status = 'finished';
+      participant.violation = true;
+      participant.finishedAt = new Date().toISOString();
+      await redis.hset(keys.lobby, userId, JSON.stringify(participant));
+    }
+
+
+    // 4️⃣ Notify the user
+    io.to(`user:${userId}`).emit('round3:violation', {
+      success: false,
+      message: 'You have been disqualified from Round 3 due to rule violations.'
+    });
+    socket.leave(`round${ROUND_NUMBER}`);
+
+    // 5️⃣ Broadcast lobby update
+    await broadcastLobbyUpdate();
+
+    console.log(`[ROUND 3] User ${userId} disqualified successfully`);
+
+  } catch (err) {
+    console.error('[ROUND 3] Error handling violation:', err);
+  }
+};
+

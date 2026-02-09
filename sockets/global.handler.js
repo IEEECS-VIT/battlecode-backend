@@ -1,29 +1,33 @@
 import prisma from "../config/prisma.js";
-import { round1RecoveryHandler,endRound1 } from "./round1.handler.js";
+import { round1RecoveryHandler, endRound1 } from "./round1.handler.js";
+import { handleRound0Violation } from "./round0.handler.js";
+// import handleRound1Violation from "./round1.handler.js";
+// import { handleRound2Violation } from "./round2.handler.js";
+import { handleRound3Violation } from "./round3.handler.js";
 
 export const globalHandler = (io, socket) => {
   console.log(` Global handler initialized for user: ${socket.user.email}`);
 
   socket.on("admin:endRound", async ({ roundNumber }) => {
-  if (socket.user.role !== "ADMIN") {
-    socket.emit("admin:error", { error: "Unauthorized" });
-    return;
-  }
+    if (socket.user.role !== "ADMIN") {
+      socket.emit("admin:error", { error: "Unauthorized" });
+      return;
+    }
 
-  if (roundNumber === 1) {
-    await endRound1(io);
+    if (roundNumber === 1) {
+      await endRound1(io);
 
-  const updatedRound = await getCurrentRound();
-  io.emit("server:currentRound", updatedRound);
-  }
-});
-  
+      const updatedRound = await getCurrentRound();
+      io.emit("server:currentRound", updatedRound);
+    }
+  });
+
   // Handle user joining - ensure they're in the leaderboard
   const handleUserJoin = async (payload, callback) => {
     console.log(`handleUserJoin called for user: ${socket.user.email}`);
     try {
       const userId = socket.user.email;
-      
+
       // Check if user exists and update their last activity
       const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -45,16 +49,16 @@ export const globalHandler = (io, socket) => {
       }
 
       await broadcastLeaderboard(io);
-    
+
       const currentRound = await getCurrentRound();
       console.log(` Sending current round data to user:`, currentRound);
       socket.emit("server:currentRound", currentRound);
 
       console.log(`User ${user.username || user.name} joined the global socket`);
-      
+
       if (callback) {
-        callback({ 
-          success: true, 
+        callback({
+          success: true,
           user: {
             id: user.id,
             name: user.name,
@@ -73,20 +77,20 @@ export const globalHandler = (io, socket) => {
   };
 
   const bootstrapSocket = async () => {
-  const currentRound = await getCurrentRound();
+    const currentRound = await getCurrentRound();
 
-  if (
-    currentRound.currentRoundNumber === 1 &&
-    currentRound.currentRoundStatus === 'IN_PROGRESS'
-  ) {
-    await round1RecoveryHandler(io, socket, socket.user.email);
-  }
+    if (
+      currentRound.currentRoundNumber === 1 &&
+      currentRound.currentRoundStatus === 'IN_PROGRESS'
+    ) {
+      await round1RecoveryHandler(io, socket, socket.user.email);
+    }
 
-  // ONLY after recovery finishes
-  await handleUserJoin({}, null);
-};
+    // ONLY after recovery finishes
+    await handleUserJoin({}, null);
+  };
 
-bootstrapSocket();
+  bootstrapSocket();
 
   // Handle leaderboard request
   const handleLeaderboardRequest = async (payload, callback) => {
@@ -94,27 +98,27 @@ bootstrapSocket();
     try {
       const { currentRoundNumber, currentRoundStatus } = await getCurrentRound();
 
-    if (
-      currentRoundNumber === 3 &&
-      currentRoundStatus !== 'LOCKED'
-    ) {
-      return callback?.({
-        success: false,
-        error: "Leaderboard is locked"
-      });
-    }
+      if (
+        currentRoundNumber === 3 &&
+        currentRoundStatus !== 'LOCKED'
+      ) {
+        return callback?.({
+          success: false,
+          error: "Leaderboard is locked"
+        });
+      }
 
-    if (currentRoundNumber > 3) {
-      return callback?.({
-        success: false,
-        error: "Leaderboard is no longer available"
-      });
-    }
+      if (currentRoundNumber > 3) {
+        return callback?.({
+          success: false,
+          error: "Leaderboard is no longer available"
+        });
+      }
       const leaderboard = await getLeaderboard();
-      
+
       console.log(`Sending leaderboard data:`, leaderboard);
       socket.emit("server:leaderboard", { leaderboard });
-      
+
       if (callback) {
         callback({ success: true, leaderboard });
       }
@@ -131,10 +135,10 @@ bootstrapSocket();
     console.log(`handleCurrentRoundRequest called for user: ${socket.user.email}`);
     try {
       const currentRound = await getCurrentRound();
-      
+
       console.log(`Sending current round data:`, currentRound);
       socket.emit("server:currentRound", currentRound);
-      
+
       if (callback) {
         callback({ success: true, currentRound });
       }
@@ -175,6 +179,7 @@ bootstrapSocket();
   socket.on("user:leaderboard", handleLeaderboardRequest);
   socket.on("user:current-round", handleCurrentRoundRequest);
   socket.on("user:broadcast", handleUserBroadcast);
+  socket.on("global:violation", handleGlobalViolation);
 };
 
 // Helper function to get current round
@@ -191,14 +196,14 @@ const getCurrentRound = async () => {
 
     // Find the current active round (IN_PROGRESS) or the next upcoming round (LOBBY)
     let currentRound = rounds.find(r => r.status === 'IN_PROGRESS');
-    
+
     if (!currentRound) {
       // If no round is in progress, find the next round in lobby state
       currentRound = rounds.find(r => r.status === 'LOBBY');
     }
-    
+
     if (!currentRound) {
-    
+
       currentRound = rounds.find(r => r.status === 'LOCKED');
     }
 
@@ -243,7 +248,7 @@ const getLeaderboard = async () => {
         },
         orderBy: [
           { eventScore: 'desc' },
-          { name: 'asc' } 
+          { name: 'asc' }
         ]
       });
 
@@ -255,7 +260,7 @@ const getLeaderboard = async () => {
         score: user.eventScore,
         currentRound: user.currentRound,
         regNo: user.regNo,
-        trend: '' 
+        trend: ''
       }));
 
       return leaderboard;
@@ -272,7 +277,7 @@ const getLeaderboard = async () => {
   }
 };
 
-socket.on("global:violation", handleGlobalViolation);
+
 
 const handleGlobalViolation = async (payload, callback) => {
 
@@ -281,8 +286,9 @@ const handleGlobalViolation = async (payload, callback) => {
       status: 'IN_PROGRESS',
     },
   });
+  userId = payload.userId;
   console.log(`handling violation for round ${currentRound}`);
-  console.log(`user:  ${payload?.userId} has violated 5 times`);
+  console.log(`user: ${payload?.userId} has violated 5 times`);
 
   if (!currentRound) {
     if (callback) {
@@ -290,15 +296,15 @@ const handleGlobalViolation = async (payload, callback) => {
     }
     return;
   }
-  else if (curentRound === 0) {
-    await handleRound0Violation(payload, callback);
+  else if (currentRound.roundNumber === 0) {
+    await handleRound0Violation(io,);
   }
-  else if (currentRound.roundNumber === 1) {
-    await handleRound1Violation(payload, callback);
-  }
-  else if (currentRound.roundNumber === 2) {
-    await handleRound2Violation(payload, callback);
-  }
+  // else if (currentRound.roundNumber === 1) {
+  //   await handleRound1Violation(payload, callback);
+  // }
+  // else if (currentRound.roundNumber === 2) {
+  //   await handleRound2Violation(payload, callback);
+  // }
   else if (currentRound.roundNumber === 3) {
     await handleRound3Violation(payload, callback);
   }
@@ -335,4 +341,3 @@ const broadcastLeaderboard = async (io) => {
 };
 
 export { getCurrentRound, getLeaderboard, broadcastLeaderboard };
-  
