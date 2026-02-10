@@ -10,7 +10,7 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
 
 const MINUTE = 60;
 // Round 3 (seconds-based)
-const ROUND_DURATION = 90 * MINUTE;                  // 5400s = 1.5 hrs
+const ROUND_DURATION = 60 * MINUTE;                  // 5400s = 1.5 hrs
 const HACKING_PHASE_START_AFTER_SECONDS = 30 * MINUTE; // 1800s = 30 mins
 
 const ROUND_NUMBER = 3;

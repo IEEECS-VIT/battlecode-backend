@@ -1,13 +1,13 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-
+import { broadcastLeaderboard } from "./global.handler.js";
 // --- Constants ---
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 
 // Round 2
-const ROUND_DURATION_MS = 1.5 * HOUR;        // 90 minutes total round window
+const ROUND_DURATION_MS = 1 * HOUR;        // 90 minutes total round window
 const MATCH_DURATION_MS = 25 * MINUTE;       // 25 minutes per match
 
 const COOLDOWN_DURATION_S = 30;              // 30 seconds
