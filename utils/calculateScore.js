@@ -126,7 +126,7 @@ export const ScoreBounty = (difficulty, submits, isSolved) => {
     }
 
     if (isSolved) {
-        return score *= 0.5;
+        return score *= 1;
     }
 
     return score;

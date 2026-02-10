@@ -1150,7 +1150,7 @@ export const round0Handler = (io, socket) => {
     const { userId, error } = validateUser();
     if (error) return;
 
-    await handleRound0Violation(userId);
+    await handleRound0Violation(io, userId);
   });
 
 
@@ -1375,6 +1375,7 @@ export const getRound0Status = async () => {
 
 
 export const handleRound0Violation = async (io, userId) => {
+  console.log("Entered  function");
   const keys = getRedisKeys(userId);
 
   try {
@@ -1397,6 +1398,7 @@ export const handleRound0Violation = async (io, userId) => {
     globalRoundState.participants.delete(userId);
 
     // 4️⃣ Notify user
+    console.log("inside notify user");
     io.to(`user:${userId}`).emit('round0:violation', {
       success: false,
       message: 'You have been disqualified due to a violation.'

@@ -1,8 +1,8 @@
 import prisma from "../config/prisma.js";
 import { round1RecoveryHandler, endRound1 } from "./round1.handler.js";
 import { handleRound0Violation } from "./round0.handler.js";
-// import handleRound1Violation from "./round1.handler.js";
-// import { handleRound2Violation } from "./round2.handler.js";
+import { handleRound1Violation } from "./round1.handler.js";
+import { handleRound2Violation } from "./round2.handler.js";
 import { handleRound3Violation } from "./round3.handler.js";
 
 export const globalHandler = (io, socket) => {
@@ -179,7 +179,10 @@ export const globalHandler = (io, socket) => {
   socket.on("user:leaderboard", handleLeaderboardRequest);
   socket.on("user:current-round", handleCurrentRoundRequest);
   socket.on("user:broadcast", handleUserBroadcast);
-  socket.on("global:violation", handleGlobalViolation);
+  socket.on("global:violation", (payload, callback) => {
+    console.log("came to listner");
+    handleGlobalViolation(io, socket, payload, callback);
+  });
 };
 
 // Helper function to get current round
@@ -279,34 +282,42 @@ const getLeaderboard = async () => {
 
 
 
-const handleGlobalViolation = async (payload, callback) => {
+const handleGlobalViolation = async (io, socket, payload, callback) => {
+  console.log("Inside handleGlobalViolation function in global handler");
 
-  const currentRound = await prisma.round.findFirst({
-    where: {
-      status: 'IN_PROGRESS',
-    },
-  });
-  userId = payload.userId;
-  console.log(`handling violation for round ${currentRound}`);
-  console.log(`user: ${payload?.userId} has violated 5 times`);
-
-  if (!currentRound) {
+  const { currentRoundNumber, currentRoundStatus } = await getCurrentRound();
+  console.log("Inside handleGlobalViolation function in global handler 2");
+  if (currentRoundStatus !== 'IN_PROGRESS') {
     if (callback) {
       callback({ success: false, error: "No round in progress" });
     }
     return;
   }
-  else if (currentRound.roundNumber === 0) {
-    await handleRound0Violation(io,);
+  console.log("Inside handleGlobalViolation function in global handler 3");
+  const userId = socket.user.email;
+
+  console.log(`handling violation for round ${currentRoundNumber}`);
+  console.log(`user: ${payload?.userId} has violated 5 times`);
+
+
+
+
+
+  if (currentRoundNumber === 0) {
+    console.log("before entering function");
+    await handleRound0Violation(io, userId);
   }
-  // else if (currentRound.roundNumber === 1) {
-  //   await handleRound1Violation(payload, callback);
-  // }
-  // else if (currentRound.roundNumber === 2) {
-  //   await handleRound2Violation(payload, callback);
-  // }
-  else if (currentRound.roundNumber === 3) {
-    await handleRound3Violation(payload, callback);
+  else if (currentRoundNumber === 1) {
+    console.log("round 1 violation function call");
+    await handleRound1Violation(io, userId);
+  }
+  else if (currentRoundNumber === 2) {
+    console.log("round 2 violation function call");
+    await handleRound2Violation(io, userId);
+  }
+  else if (currentRoundNumber === 3) {
+    console.log("round 3 violation function call");
+    await handleRound3Violation(io, userId);
   }
   else {
     if (callback) {

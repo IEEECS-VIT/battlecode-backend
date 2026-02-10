@@ -1061,54 +1061,7 @@ export const round1Handler = (io, socket) => {
     }
   });
 
-  socket.on('round1:violation', async () => {
-    const { userId, error } = validateUser();
-    if (error) return;
-    try {
-      const keys = getRedisKeys();
 
-      // 1️⃣ Find active match
-      const matches = await redis.hgetall(keys.matches);
-
-      let matchId = null;
-      let match = null;
-
-      for (const id in matches) {
-        const parsed = JSON.parse(matches[id]);
-        if (parsed.players.includes(userId)) {
-          matchId = id;
-          match = parsed;
-          break;
-        }
-      }
-
-      if (!matchId || !match) {
-        console.warn(`[Violation] No active match for ${userId}`);
-        return;
-      }
-
-      // 2️⃣ Identify opponent
-      const opponentId = match.players.find(p => p !== userId);
-      if (!opponentId) return;
-
-      console.warn(
-        `[Violation] User ${userId} exceeded violation limit. Forfeiting match ${matchId}`
-      );
-
-      const matchStr = await redis.hget(keys.matches, matchId);
-      if (!matchStr) return;
-
-
-      // 3️⃣ End match using EXISTING logic
-      await handleMatchEnd(io, matchId, opponentId);
-
-      io.to(`user:${userId}`).emit("round1:violationForfeit");
-      io.to(`user:${opponentId}`).emit("round1:opponentViolated");
-
-    } catch (err) {
-      console.error("[Violation Handler Error]", err);
-    }
-  });
 
   //     socket.on('round1:reset', async (payload) => {
   //         const { userId, error } = validateUser();
@@ -1132,4 +1085,53 @@ export const round1Handler = (io, socket) => {
   //             return;
   //         }
   //     });
+};
+
+
+export const handleRound1Violation = async (io, userId) => {
+
+  try {
+    const keys = getRedisKeys();
+
+    // 1️⃣ Find active match
+    const matches = await redis.hgetall(keys.matches);
+
+    let matchId = null;
+    let match = null;
+
+    for (const id in matches) {
+      const parsed = JSON.parse(matches[id]);
+      if (parsed.players.includes(userId)) {
+        matchId = id;
+        match = parsed;
+        break;
+      }
+    }
+
+    if (!matchId || !match) {
+      console.warn(`[Violation] No active match for ${userId}`);
+      return;
+    }
+
+    // 2️⃣ Identify opponent
+    const opponentId = match.players.find(p => p !== userId);
+    if (!opponentId) return;
+
+    console.warn(
+      `[Violation] User ${userId} exceeded violation limit. Forfeiting match ${matchId}`
+    );
+
+    const matchStr = await redis.hget(keys.matches, matchId);
+    if (!matchStr) return;
+
+
+    // 3️⃣ End match using EXISTING logic
+    await handleMatchEnd(io, matchId, opponentId);
+
+    io.to(`user:${userId}`).emit("round1:violationForfeit");
+    io.to(`user:${opponentId}`).emit("round1:opponentViolated");
+
+  } catch (err) {
+    console.error("[Violation Handler Error]", err);
+  }
 };

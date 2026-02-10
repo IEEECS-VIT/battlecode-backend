@@ -940,9 +940,8 @@ export const endRound3 = async (io) => {
   }
 };
 
-export const handleRound3Violation = async (payload) => {
-  const { userId, error } = validateUser();
-  if (error) return;
+export const handleRound3Violation = async (io, userId) => {
+
 
   try {
     const keys = getRedisKeys();
