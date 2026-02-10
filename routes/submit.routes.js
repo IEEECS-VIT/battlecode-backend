@@ -253,8 +253,8 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       httpAgent,
       headers: {
         ...(JUDGE0_API_KEY && { "X-RapidAPI-Key": JUDGE0_API_KEY }),
-        "X-Judge0-Client-ID": JUDGE0_CLIENT_ID,
-        "X-Judge0-Client": JUDGE0_CLIENT,
+        "X-Judge0-Client-ID": process.env.JUDGE0_CLIENT_ID,
+        "X-Judge0-Client": process.env.JUDGE0_CLIENT,
       },
     };
     const submissions = allTestCases.map((testCase, idx) => ({
