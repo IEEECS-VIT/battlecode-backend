@@ -15,8 +15,6 @@ const CHALLENGE_REQUEST_EXPIRY_S = 60;       // 1 minute
 const ACTION_LOCK_MS = 1 * MINUTE;            // 1 minute
 const DISCONNECT_GRACE_PERIOD_MS = 15 * SECOND; // 15 seconds
 
-const ROLE_THRESHOLD_SCORE = 500;
-
 
 // --- Module-Scoped Variables ---
 let round2IO = null;
@@ -49,56 +47,75 @@ const getRedisKeys = (userId = '', questionId = '', matchId = '') => ({
     challengerLock: (challengerId) => `r2:challenger:lock:${challengerId}`
 });
 
-const updatePlayerRole = async (userId) => {
-    try {
-        const user = await prisma.user.findUnique({ where: { id: userId }, select: { eventScore: true, round2Role: true }});
-        if (!user) throw new Error(`User ${userId} not found in DB for role update.`);
+const updatePlayerRole = async () => {
+  try {
+    // 1️⃣ Get all Round 2 participants
+    const keys = getRedisKeys();
+    const participantsData = await redis.hgetall(keys.participants);
+    const participants = Object.values(participantsData).map(p => JSON.parse(p));
 
-        const newRole = user.eventScore > ROLE_THRESHOLD_SCORE ? "elite" : "challenger";
-        const newDbRole = newRole.toUpperCase();
+    if (participants.length === 0) return;
 
-        if (user.round2Role !== newDbRole) {
-            await prisma.user.update({
-                where: { id: userId },
-                data: { round2Role: newDbRole }
-            });
-        }
+    const userScores = await prisma.user.findMany({
+      where: { id: { in: participants.map(p => p.id) } },
+      select: { id: true, eventScore: true }
+    });
 
-        const keys = getRedisKeys();
-        const participantStr = await redis.hget(keys.participants, userId);
-        if (participantStr) {
-            const participant = JSON.parse(participantStr);
-            const oldRole = participant.role;
+    const scoreMap = new Map(userScores.map(u => [u.id, u.eventScore]));
 
-            if (oldRole !== newRole) {
-                participant.role = newRole;
-                if (participant.status.includes(oldRole)) {
-                    participant.status = participant.status.replace(oldRole, newRole);
-                }
-
-                const multi = redis.multi()
-                    .hset(keys.participants, userId, JSON.stringify(participant))
-                    .set(keys.role(userId), newRole);
-
-                if (newRole === 'elite') {
-                    multi.srem(keys.challengers, userId).sadd(keys.elites, userId);
-                } else {
-                    multi.srem(keys.elites, userId).sadd(keys.challengers, userId);
-                }
-                await multi.exec();
-
-                if (round2IO) {
-                    round2IO.to(`user:${userId}`).emit("round2:roleUpdate", { userId, newRole });
-                }
-                console.log(`Role for ${userId} updated from ${oldRole} to ${newRole}`);
-            }
-        }
-        return { userId, newRole };
-    } catch (err) {
-        console.error(`Failed to update role for user ${userId}:`, err);
-        return { userId, newRole: null };
+    for (const p of participants) {
+      p.eventScore = scoreMap.get(p.id) ?? 0;
     }
+
+    // 2️⃣ Sort by eventScore DESC
+    participants.sort((a, b) => (b.eventScore || 0) - (a.eventScore || 0));
+
+    // 3️⃣ Compute cutoff (top 40%)
+    const eliteCount = Math.ceil(participants.length * 0.4);
+    const eliteIds = new Set(participants.slice(0, eliteCount).map(p => p.id));
+
+    const multi = redis.multi();
+    const dbUpdates = [];
+
+    // 4️⃣ Assign roles based on rank
+    for (const p of participants) {
+      const newRole = eliteIds.has(p.id) ? "elite" : "challenger";
+      const newDbRole = newRole.toUpperCase();
+
+      if (p.role !== newRole) {
+        p.role = newRole;
+        if (p.status?.includes(":")) {
+          p.status = `${newRole}:idle`;
+        }
+
+        multi.hset(keys.participants, p.id, JSON.stringify(p));
+        multi.set(keys.role(p.id), newRole);
+
+        if (newRole === "elite") {
+          multi.sadd(keys.elites, p.id).srem(keys.challengers, p.id);
+        } else {
+          multi.sadd(keys.challengers, p.id).srem(keys.elites, p.id);
+        }
+
+        dbUpdates.push(
+          prisma.user.update({
+            where: { id: p.id },
+            data: { round2Role: newDbRole }
+          })
+        );
+
+        round2IO?.to(`user:${p.id}`).emit("round2:roleUpdate", {
+          newRole
+        });
+      }
+    }
+
+    await Promise.all([multi.exec(), ...dbUpdates]);
+  } catch (err) {
+    console.error("Failed to recompute Round 2 roles:", err);
+  }
 };
+
 
 const broadcastLobbyUpdate = async () => {
   if (!round2IO) return;
@@ -279,13 +296,20 @@ export const round2Handler = (io, socket) => {
 
       await broadcastLeaderboard(io);
 
-      // --- FIX: Update roles FIRST, before emitting the event ---
-      const [winnerUpdate, loserUpdate] = await Promise.all([updatePlayerRole(winnerId), updatePlayerRole(loserId)]);
+      await updatePlayerRole();
 
-      // --- FIX: Emit targeted events to each user with their new role ---
-      io.to(`user:${winnerId}`).emit("round2:matchResult", { winnerId, loserId, reason, newRole: winnerUpdate.newRole });
+      io.to(`user:${winnerId}`).emit("round2:matchResult", {
+        winnerId,
+        loserId,
+        reason
+      });
+
       if (loserId) {
-          io.to(`user:${loserId}`).emit("round2:matchResult", { winnerId, loserId, reason, newRole: loserUpdate.newRole });
+        io.to(`user:${loserId}`).emit("round2:matchResult", {
+          winnerId,
+          loserId,
+          reason
+        });
       }
 
       for (const pId of [challengerId, eliteId]) {
@@ -324,8 +348,12 @@ export const round2Handler = (io, socket) => {
         .sadd(keys.attemptedBounties(userId), questionId)
         .exec();
 
-      // --- FIX: Update role FIRST and get the new role ---
-      const { newRole } = await updatePlayerRole(userId);
+      io.to(`user:${userId}`).emit("round2:bountyEnded", {
+        questionId,
+        reason: isCorrect ? "completed" : "incorrect"
+      });
+
+      await updatePlayerRole();
 
       const pStr = await redis.hget(keys.participants, userId);
       if (pStr) {
@@ -334,12 +362,6 @@ export const round2Handler = (io, socket) => {
           await redis.hset(keys.participants, userId, JSON.stringify(p));
       }
       
-      // --- FIX: Include the new role in the event payload ---
-      io.to(`user:${userId}`).emit("round2:bountyEnded", { 
-          questionId, 
-          reason: isCorrect ? "completed" : "incorrect",
-          newRole 
-      });
 
       await broadcastDashboardUpdates();
     } catch (err) {
@@ -441,7 +463,7 @@ export const round2Handler = (io, socket) => {
 
       const participantsData = await redis.hgetall(keys.participants);
       const players = Object.values(participantsData).map(p => JSON.parse(p));
-      const eliteCount = Math.ceil(players.length * 0.5);
+      const eliteCount = Math.ceil(players.length * 0.4);
       const multi = redis.multi();
       const dbUpdatePromises = [];
 
@@ -1221,31 +1243,22 @@ export const round2AdminAddUser = async (io, userId) => {
       io.to(`user:${userId}`).emit("round2:adminAdded");
       return;
     }
-
-    const role =
-      user.eventScore >= ROLE_THRESHOLD_SCORE
-        ? "ELITE"
-        : "CHALLENGER";
-
-    const redisRole = role.toLowerCase();
-
     const participant = {
       id: userId,
       username: user.username,
       eventScore: user.eventScore,
-      role: redisRole,
+      role: null,
       status: roundDB.status === "IN_PROGRESS" ? "idle" : "lobby"
     };
 
     await redis.hset(keys.participants, userId, JSON.stringify(participant));
-    await redis.set(keys.role(userId), redisRole);
+    await updatePlayerRole();
 
     if (roundDB.status === "IN_PROGRESS") {
-      await redis.sadd(`round2:${redisRole}:online`, userId);
-      io.to(`user:${userId}`).emit("round2:dashboard:init", { role });
-    } else {
-      io.to(`user:${userId}`).emit("round2:adminAdded");
-    }
+    io.to(`user:${userId}`).emit("round2:getState");
+  } else {
+    io.to(`user:${userId}`).emit("round2:adminAdded");
+  }
 
     io.emit("admin:success", { action: "add", userId, round: 2 });
 

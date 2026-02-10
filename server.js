@@ -10,7 +10,7 @@ import getJudge0Client from "./config/judge0.js"; // adjust path if needed
 (async () => {
   try {
     const judge0 = await getJudge0Client();
-    const res = await judge0.get("/judge0/languages");
+    const res = await judge0.get("/v1/languages");
     console.log("✅ Judge0 connected. Languages:", res.data.length);
   } catch (err) {
     console.error("❌ Judge0 connection failed");
