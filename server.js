@@ -7,16 +7,16 @@ import cors from "cors";
 import initializeSocket from "./sockets/index.js";
 import getJudge0Client from "./config/judge0.js"; // adjust path if needed
 
-(async () => {
-  try {
-    const judge0 = await getJudge0Client();
-    const res = await judge0.get("/v1/languages");
-    console.log("✅ Judge0 connected. Languages:", res.data.length);
-  } catch (err) {
-    console.error("❌ Judge0 connection failed");
-    console.error(err.response?.data || err.message);
-  }
-})();
+// (async () => {
+//   try {
+//     const judge0 = await getJudge0Client();
+//     const res = await judge0.get("/v1/languages");
+//     console.log("✅ Judge0 connected. Languages:", res.data.length);
+//   } catch (err) {
+//     console.error("❌ Judge0 connection failed");
+//     console.error(err.response?.data || err.message);
+//   }
+// })();
 
 
 const app = express();

@@ -2,7 +2,7 @@ import prisma from "../config/prisma.js";
 import { round1RecoveryHandler, endRound1 } from "./round1.handler.js";
 import { handleRound0Violation } from "./round0.handler.js";
 import { handleRound1Violation } from "./round1.handler.js";
-import { handleRound2Violation } from "./round2.handler.js";
+// import { handleRound2Violation } from "./round2.handler.js";
 import { handleRound3Violation } from "./round3.handler.js";
 
 export const globalHandler = (io, socket) => {
@@ -311,10 +311,10 @@ const handleGlobalViolation = async (io, socket, payload, callback) => {
     console.log("round 1 violation function call");
     await handleRound1Violation(io, userId);
   }
-  else if (currentRoundNumber === 2) {
-    console.log("round 2 violation function call");
-    await handleRound2Violation(io, userId);
-  }
+  // else if (currentRoundNumber === 2) {
+  //   console.log("round 2 violation function call");
+  //   await handleRound2Violation(io, userId);
+  // }
   else if (currentRoundNumber === 3) {
     console.log("round 3 violation function call");
     await handleRound3Violation(io, userId);
