@@ -25,7 +25,7 @@ const HARD_API_TIMEOUT_MS = 60_000; // 60 seconds
 const POLL_INTERVAL_MS = 1000;
 
 const LANGUAGE_ID_MAP = {
-  cpp: 54,
+  cpp: 105,
   python: 71,
   java: 62,
   c: 50,
