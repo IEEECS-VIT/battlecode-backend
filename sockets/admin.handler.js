@@ -1,6 +1,6 @@
 import prisma from "../config/prisma.js";
 import redis from "../config/redis.js";
-import { broadcastCurrentRound } from "./global.handler.js";
+import { broadcastCurrentRound, broadcastLeaderboard } from "./global.handler.js";
 import { round0AdminAddUser, round0AdminRemoveUser, endRound0 } from "./round0.handler.js";
 import { round1AdminAddUser, round1AdminRemoveUser, endRound1 } from "./round1.handler.js";
 import { round2AdminAddUser, round2AdminRemoveUser, endRound2 } from "./round2.handler.js";
@@ -205,6 +205,26 @@ export const adminHandler = (io, socket) => {
     } catch (error) {
       console.error(`[ADMIN] Error ending round ${roundNumber}:`, error);
       return callback?.({ success: false, error: error.message || 'Failed to end round' });
+    }
+  });
+
+  socket.on("admin:resetUsers", async (_payload, callback) => {
+    if (socket.user.role !== "ADMIN") {
+      return callback?.({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+      await prisma.user.updateMany({
+        data: {
+          eventScore: 0,
+          round2Role: null,
+          qualifiedForR3: false,
+        },
+      });
+      callback?.({ success: true });
+    } catch (err) {
+      console.error("[ADMIN] resetUsers error:", err);
+      callback?.({ success: false, error: "Failed to reset users" });
     }
   });
 
