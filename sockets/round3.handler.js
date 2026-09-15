@@ -1,6 +1,6 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-import { getCurrentRound } from "./global.handler.js";
+import { broadcastCurrentRound } from "./global.handler.js";
 import { HackStatus, SubmissionStatus } from '@prisma/client';
 
 /**
@@ -8,10 +8,11 @@ import { HackStatus, SubmissionStatus } from '@prisma/client';
  * Manages the real-time state and events for Round 3 of the competition.
  */
 
-const MINUTE = 60;
-// Round 3 (seconds-based)
-const ROUND_DURATION = 60 * MINUTE;                  // 5400s = 1.5 hrs
-const HACKING_PHASE_START_AFTER_SECONDS = 30 * MINUTE; // 1800s = 30 mins
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+// Round 3 (milliseconds)
+const ROUND_DURATION_MS = 60 * MINUTE;                    // 1 hour
+const HACKING_PHASE_START_AFTER_MS = 30 * MINUTE;          // 30 minutes
 
 const ROUND_NUMBER = 3;
 
@@ -75,8 +76,8 @@ const broadcastLobbyUpdate = async (io) => {
 
     let timeRemaining = 0;
     if (globalRoundState.isActive && globalRoundState.startTime) {
-      const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-      timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+      const elapsed = (Date.now() - globalRoundState.startTime);
+      timeRemaining = Math.max(ROUND_DURATION_MS - elapsed, 0);
     }
 
     const byStatus = {
@@ -96,9 +97,9 @@ const broadcastLobbyUpdate = async (io) => {
         isActive: globalRoundState.isActive,
         status: round3DB?.status || 'LOBBY',
         startTime: globalRoundState.startTime,
-        endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+        endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION_MS) : null,
         timeRemaining,
-        duration: ROUND_DURATION
+        duration: ROUND_DURATION_MS
       },
       participants: {
         total: lobbyParticipants.length,
@@ -126,7 +127,6 @@ export const round3Handler = (io, socket) => {
     }
     return { userId };
   };
-
   const startGlobalTimer = (io) => {
     if (globalRoundState.timerInterval) {
       clearInterval(globalRoundState.timerInterval);
@@ -134,11 +134,11 @@ export const round3Handler = (io, socket) => {
 
     globalRoundState.timerInterval = setInterval(async () => {
       try {
-        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-        const timeRemaining = ROUND_DURATION - elapsed;
+        const elapsed = (Date.now() - globalRoundState.startTime);
+        const timeRemaining = ROUND_DURATION_MS - elapsed;
 
         if (
-          elapsed >= HACKING_PHASE_START_AFTER_SECONDS &&
+          elapsed >= HACKING_PHASE_START_AFTER_MS &&
           !globalRoundState.isHackingPhase
         ) {
           globalRoundState.isHackingPhase = true;
@@ -156,6 +156,7 @@ export const round3Handler = (io, socket) => {
           globalRoundState.isActive = false;
           await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
           await redis.set(getRedisKeys().state, 'COMPLETED');
+          await broadcastCurrentRound(io);
           io.to(`round${ROUND_NUMBER}`).emit('round3:ended', { message: 'Round 3 has ended!' });
           console.log('[ROUND 3] Round has officially ended.');
         } else {
@@ -176,17 +177,18 @@ export const round3Handler = (io, socket) => {
         const problemsRaw = await redis.get(keys.problems);
         if (startTimeRaw && problemsRaw) {
           const startTime = parseInt(startTimeRaw);
-          const elapsed = Math.floor((Date.now() - startTime) / 1000);
-          if (elapsed < ROUND_DURATION) {
+          const elapsed = (Date.now() - startTime);
+          if (elapsed < ROUND_DURATION_MS) {
             globalRoundState.isActive = true;
             globalRoundState.startTime = startTime;
             globalRoundState.problems = JSON.parse(problemsRaw);
-            globalRoundState.isHackingPhase = elapsed >= HACKING_PHASE_START_AFTER_SECONDS;
+            globalRoundState.isHackingPhase = elapsed >= HACKING_PHASE_START_AFTER_MS;
             startGlobalTimer(io);
             console.log('[ROUND 3] Synced active round state from Redis.');
           } else {
             await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
             await redis.set(keys.state, 'COMPLETED');
+            await broadcastCurrentRound(io);
 
             initializeGlobalState();
           }
@@ -303,6 +305,7 @@ export const round3Handler = (io, socket) => {
         where: { roundNumber: ROUND_NUMBER },
         data: { status: 'IN_PROGRESS' },
       });
+      await broadcastCurrentRound(io);
 
       globalRoundState.isActive = true;
       globalRoundState.startTime = startTime;
@@ -312,7 +315,7 @@ export const round3Handler = (io, socket) => {
       io.to(`round${ROUND_NUMBER}`).emit('round3:start', {
         questions: problems,
         startTime,
-        duration: ROUND_DURATION,
+        duration: ROUND_DURATION_MS,
       });
 
       // Broadcast updated lobby state with participants now in 'in_match'
@@ -498,7 +501,7 @@ export const round3Handler = (io, socket) => {
             startTime: null,
             endTime: null,
             timeRemaining: 0,
-            duration: ROUND_DURATION
+            duration: ROUND_DURATION_MS
           },
           participants: {
             total: 0,
@@ -564,7 +567,7 @@ export const round3Handler = (io, socket) => {
             startTime: null,
             endTime: null,
             timeRemaining: 0,
-            duration: ROUND_DURATION
+            duration: ROUND_DURATION_MS
           },
           participants: {
             total: 0,
@@ -598,8 +601,8 @@ export const round3Handler = (io, socket) => {
       // Calculate timeRemaining
       let timeRemaining = 0;
       if (globalRoundState.isActive && globalRoundState.startTime) {
-        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+        const elapsed = (Date.now() - globalRoundState.startTime);
+        timeRemaining = Math.max(ROUND_DURATION_MS - elapsed, 0);
       }
 
       // Group participants by status
@@ -619,8 +622,8 @@ export const round3Handler = (io, socket) => {
 
         // Recalculate timeRemaining after sync
         if (globalRoundState.isActive && globalRoundState.startTime) {
-          const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-          timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+          const elapsed = (Date.now() - globalRoundState.startTime);
+          timeRemaining = Math.max(ROUND_DURATION_MS - elapsed, 0);
         }
       }
 
@@ -641,9 +644,9 @@ export const round3Handler = (io, socket) => {
           isActive: globalRoundState.isActive,
           status: round3DB.status,
           startTime: globalRoundState.startTime,
-          endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+          endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION_MS) : null,
           timeRemaining,
-          duration: ROUND_DURATION
+          duration: ROUND_DURATION_MS
         },
 
         participants: {
@@ -684,7 +687,7 @@ export const round3Handler = (io, socket) => {
           startTime: null,
           endTime: null,
           timeRemaining: 0,
-          duration: ROUND_DURATION
+          duration: ROUND_DURATION_MS
         },
         participants: {
           total: 0,
@@ -712,6 +715,7 @@ export const round3Handler = (io, socket) => {
         return callback?.({ success: false, error: 'Unauthorized.' });
       }
       await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'LOBBY' } });
+      await broadcastCurrentRound(io);
       await prisma.lockedSolution.deleteMany({ where: { problem: { roundId: ROUND_NUMBER } } });
       await prisma.hackAttempt.deleteMany({ where: { problem: { roundId: ROUND_NUMBER } } });
       const success = await resetRoundState();
@@ -946,9 +950,7 @@ export const endRound3 = async (io) => {
     // 6️⃣ Reset in-memory state (DO NOT wipe hack data here)
     initializeGlobalState();
 
-    // 7️⃣ 🔥 Notify admin dashboard (THIS IS CRITICAL)
-    const currentRound = await getCurrentRound();
-    io.emit('server:currentRound', currentRound);
+    await broadcastCurrentRound(io);
 
     console.log('[ROUND 3] Round ended successfully.');
   } catch (error) {

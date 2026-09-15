@@ -27,9 +27,10 @@ app.use(cors({
     "https://battlecode-frontend-cc.vercel.app",
     "https://battlecode-backend.ieeecsvit.com",
     "https://battlecode.ieeecsvit.com",
-    "https://battlecode-frontend-yantra.vercel.app"
+    "https://battlecode-frontend-yantra.vercel.app",
+    "https://battlecode-frontend-26.vercel.app"
   ],
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true
 }));
 
@@ -41,9 +42,10 @@ const io = new Server(httpServer, {
       "https://battlecode-frontend-cc.vercel.app",
       "https://battlecode-backend.ieeecsvit.com",
       "https://battlecode.ieeecsvit.com",
-      "https://battlecode-frontend-yantra.vercel.app"
+      "https://battlecode-frontend-yantra.vercel.app",
+      "https://battlecode-frontend-26.vercel.app"
     ],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   },
 });

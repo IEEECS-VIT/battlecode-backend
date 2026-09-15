@@ -1,6 +1,7 @@
 import express from "express";
 import prisma from "../config/prisma.js";
 import verifyAuthToken from "../middleware/authMiddleware.js";
+import { broadcastCurrentRound } from "../sockets/global.handler.js";
 
 const router = express.Router();
 
@@ -110,30 +111,9 @@ router.patch('/rounds/:roundNumber/status', verifyAuthToken, requireAdmin, async
       data: { status }
     });
 
-    // Get updated rounds list for broadcast
-    const allRounds = await prisma.round.findMany({
-      orderBy: { roundNumber: 'asc' },
-      select: {
-        roundNumber: true,
-        status: true
-      }
-    });
-
-    // Broadcast the update to all connected clients via socket if available
-    if (req.app.get('io')) {
-      const io = req.app.get('io');
-      const roundsData = {
-        currentRoundNumber: allRounds.find(r => r.status === 'IN_PROGRESS')?.roundNumber || 0,
-        currentRoundStatus: allRounds.find(r => r.status === 'IN_PROGRESS')?.status || 'LOCKED',
-        rounds: allRounds.map(round => ({
-          roundNumber: round.roundNumber,
-          status: round.status,
-          isActive: round.status === 'IN_PROGRESS',
-          isLocked: round.status === 'LOCKED'
-        }))
-      };
-      
-      io.emit('server:currentRound', roundsData);
+    const io = req.app.get('io');
+    if (io) {
+      await broadcastCurrentRound(io);
       console.log(`Broadcasted round update: Round ${roundNum} → ${status}`);
     }
 
@@ -166,21 +146,9 @@ router.post('/rounds/reset', verifyAuthToken, requireAdmin, async (req, res) => 
       data: { status: 'LOCKED' }
     });
 
-    // Broadcast the update
-    if (req.app.get('io')) {
-      const io = req.app.get('io');
-      const roundsData = {
-        currentRoundNumber: 0,
-        currentRoundStatus: 'LOCKED',
-        rounds: [0, 1, 2, 3].map(roundNumber => ({
-          roundNumber,
-          status: 'LOCKED',
-          isActive: false,
-          isLocked: true
-        }))
-      };
-      
-      io.emit('server:currentRound', roundsData);
+    const io = req.app.get('io');
+    if (io) {
+      await broadcastCurrentRound(io);
       console.log('Broadcasted round reset - all rounds locked');
     }
 

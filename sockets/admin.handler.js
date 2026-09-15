@@ -1,6 +1,6 @@
 import prisma from "../config/prisma.js";
 import redis from "../config/redis.js";
-import { getCurrentRound } from "./global.handler.js";
+import { broadcastCurrentRound } from "./global.handler.js";
 import { round0AdminAddUser, round0AdminRemoveUser, endRound0 } from "./round0.handler.js";
 import { round1AdminAddUser, round1AdminRemoveUser, endRound1 } from "./round1.handler.js";
 import { round2AdminAddUser, round2AdminRemoveUser, endRound2 } from "./round2.handler.js";
@@ -29,7 +29,7 @@ export const adminHandler = (io, socket) => {
     try {
       const { roundNumber, status } = payload;
       
-      if (!roundNumber || !status) {
+      if (roundNumber === undefined || roundNumber === null || !status) {
         if (callback) {
           callback({ success: false, error: "Round number and status are required" });
         }
@@ -67,9 +67,7 @@ export const adminHandler = (io, socket) => {
         console.log(`Admin ${socket.user.id} left room ${roomName} - round completed`);
       }
 
-      // Broadcast updated round info to all clients
-      const currentRound = await getCurrentRound();
-      io.emit("server:currentRound", currentRound);
+      await broadcastCurrentRound(io);
 
       if (callback) {
         callback({ success: true, message: `Round ${roundNumber} status updated to ${status}` });
@@ -201,8 +199,7 @@ export const adminHandler = (io, socket) => {
           return callback?.({ success: false, error: `Invalid round number: ${roundNumber}` });
       }
 
-        const currentRound = await getCurrentRound();
-        io.emit("server:currentRound", currentRound);
+        await broadcastCurrentRound(io);
 
         return callback?.({ success: true, message: `Round ${roundNumber} ended successfully` });
     } catch (error) {
@@ -247,7 +244,8 @@ export const adminHandler = (io, socket) => {
       await redis.flushdb();
       
       console.log(' Redis database has been reset successfully');
-      
+
+      await broadcastCurrentRound(io);
       
       socket.emit('admin:reset:success');
     } catch (error) {
@@ -275,11 +273,10 @@ export const handleQualifyRound3 = async (io, payload, callback) => {
       return callback?.({ success: false, error: "Invalid count" });
     }
 
-    // 1. Fetch users by leaderboard
+    // 1. Fetch users by leaderboard (Grabs EVERYONE for testing, including admins)
     const users = await prisma.user.findMany({
-      where: {
-        role: 'PLAYER',
-      },
+      // The 'where' clause is completely removed! 
+      // Now it just ranks every single user in the DB by score.
       orderBy: { eventScore: "desc" },
       select: { id: true }
     });
@@ -287,17 +284,30 @@ export const handleQualifyRound3 = async (io, payload, callback) => {
     const qualifiedIds = users.slice(0, count).map(u => u.id);
     const disqualifiedIds = users.slice(count).map(u => u.id);
 
-    // 2. Update DB
-    await prisma.$transaction([
-      prisma.user.updateMany({
-        where: { id: { in: qualifiedIds } },
-        data: { qualifiedForR3: true }
-      }),
-      prisma.user.updateMany({
-        where: { id: { in: disqualifiedIds } },
-        data: { qualifiedForR3: false }
-      })
-    ]);
+    // 2. Safely Update DB (Prevents Prisma from crashing on empty arrays)
+    const transactions = [];
+
+    if (qualifiedIds.length > 0) {
+      transactions.push(
+        prisma.user.updateMany({
+          where: { id: { in: qualifiedIds } },
+          data: { qualifiedForR3: true }
+        })
+      );
+    }
+
+    if (disqualifiedIds.length > 0) {
+      transactions.push(
+        prisma.user.updateMany({
+          where: { id: { in: disqualifiedIds } },
+          data: { qualifiedForR3: false }
+        })
+      );
+    }
+
+    if (transactions.length > 0) {
+      await prisma.$transaction(transactions);
+    }
 
     // 3. Notify admin + users
     io.emit("admin:qualificationUpdated", {

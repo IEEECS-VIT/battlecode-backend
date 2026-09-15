@@ -16,9 +16,7 @@ export const globalHandler = (io, socket) => {
 
     if (roundNumber === 1) {
       await endRound1(io);
-
-      const updatedRound = await getCurrentRound();
-      io.emit("server:currentRound", updatedRound);
+      await broadcastCurrentRound(io);
     }
   });
 
@@ -49,6 +47,8 @@ export const globalHandler = (io, socket) => {
       }
 
       await broadcastLeaderboard(io);
+
+      socket.join("global");
 
       const currentRound = await getCurrentRound();
       console.log(` Sending current round data to user:`, currentRound);
@@ -134,6 +134,7 @@ export const globalHandler = (io, socket) => {
   const handleCurrentRoundRequest = async (payload, callback) => {
     console.log(`handleCurrentRoundRequest called for user: ${socket.user.email}`);
     try {
+      socket.join("global");
       const currentRound = await getCurrentRound();
 
       console.log(`Sending current round data:`, currentRound);
@@ -176,8 +177,10 @@ export const globalHandler = (io, socket) => {
   // Socket event listeners
   console.log(` Setting up socket event listeners for user: ${socket.user.email}`);
   socket.on("user:join", handleUserJoin);
+  socket.on("client:join", handleUserJoin);
   socket.on("user:leaderboard", handleLeaderboardRequest);
   socket.on("user:current-round", handleCurrentRoundRequest);
+  socket.on("client:getCurrentRound", handleCurrentRoundRequest);
   socket.on("user:broadcast", handleUserBroadcast);
   socket.on("global:violation", (payload, callback) => {
     console.log("came to listner");
@@ -350,4 +353,11 @@ const broadcastLeaderboard = async (io) => {
   }
 };
 
-export { getCurrentRound, getLeaderboard, broadcastLeaderboard };
+const broadcastCurrentRound = async (io) => {
+  if (!io) return null;
+  const currentRound = await getCurrentRound();
+  io.emit("server:currentRound", currentRound);
+  return currentRound;
+};
+
+export { getCurrentRound, getLeaderboard, broadcastLeaderboard, broadcastCurrentRound };

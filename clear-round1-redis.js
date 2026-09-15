@@ -10,7 +10,8 @@ async function clearRound1RedisState() {
             "round1:readyQueue", 
             "round1:matches",
             "round1:status",
-            "round1:startTime"
+            "round1:status:startTime",
+            "round1:status:endTime"
         ];
         
         // Get all keys that match round1:user:* pattern (user presence keys)

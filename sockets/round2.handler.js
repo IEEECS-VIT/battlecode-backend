@@ -1,6 +1,6 @@
 import redis from "../config/redis.js";
 import prisma from "../config/prisma.js";
-import { broadcastLeaderboard, getCurrentRound } from "./global.handler.js";
+import { broadcastLeaderboard, broadcastCurrentRound } from "./global.handler.js";
 // --- Constants ---
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -10,8 +10,8 @@ const HOUR = 60 * MINUTE;
 const ROUND_DURATION_MS = 1 * HOUR;        // 90 minutes total round window
 const MATCH_DURATION_MS = 25 * MINUTE;       // 25 minutes per match
 
-const COOLDOWN_DURATION_S = 30;              // 30 seconds
-const CHALLENGE_REQUEST_EXPIRY_S = 60;       // 1 minute
+const COOLDOWN_DURATION_MS = 30 * SECOND;              // 30 seconds
+const CHALLENGE_REQUEST_EXPIRY_MS = 60 * SECOND;       // 1 minute
 const ACTION_LOCK_MS = 1 * MINUTE;            // 1 minute
 const DISCONNECT_GRACE_PERIOD_MS = 15 * SECOND; // 15 seconds
 
@@ -46,6 +46,53 @@ const getRedisKeys = (userId = '', questionId = '', matchId = '') => ({
   attemptedBounties: (id = userId) => `round2:attempted:${id}`,
   challengerLock: (challengerId) => `r2:challenger:lock:${challengerId}`
 });
+
+// Maps userId -> { matchId, opponentId, opponentRole } for every player currently in match
+// so the elite vs challenger pairing can be attached to participant list payloads (admin dashboard).
+const getMatchPairingMap = async () => {
+  const keys = getRedisKeys();
+  const pairing = new Map();
+
+  try {
+    const participants = Object.values(await redis.hgetall(keys.participants)).map(p => JSON.parse(p));
+    for (const p of participants) {
+      const matchId = await redis.get(keys.userMatch(p.id));
+      if (matchId) {
+        const matchStr = await redis.get(keys.matchInfo(matchId));
+        if (matchStr) {
+          const match = JSON.parse(matchStr);
+          const opponentId = match.eliteId === p.id ? match.challengerId : match.eliteId;
+          const opponentRole = match.eliteId === p.id ? 'challenger' : 'elite';
+          pairing.set(p.id, { matchId, opponentId, opponentRole });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[R2 Pairing Map Error]', err);
+  }
+
+  return pairing;
+};
+
+// Enriches participant with match opponent info when in_match.
+const formatParticipant = (p, pairingMap, participantById) => {
+  const formatted = {
+    id: p.id,
+    username: p.username,
+    status: p.status,
+    role: p.role
+  };
+
+  const pairing = pairingMap.get(p.id);
+  if (p.status && p.status.includes('match') && pairing) {
+    formatted.matchId = pairing.matchId;
+    formatted.opponentId = pairing.opponentId;
+    formatted.opponentUsername = participantById.get(pairing.opponentId)?.username ?? null;
+    formatted.opponentRole = pairing.opponentRole;
+  }
+
+  return formatted;
+};
 
 const updatePlayerRole = async () => {
   try {
@@ -142,6 +189,9 @@ const broadcastLobbyUpdate = async () => {
       status = 'IN_PROGRESS';
     }
 
+    const pairingMap = await getMatchPairingMap();
+    const participantById = new Map(participantsList.map(p => [p.id, p]));
+
     // Categorize participants
     const byStatus = {
       lobby: [],
@@ -155,21 +205,22 @@ const broadcastLobbyUpdate = async () => {
 
     for (const p of participantsList) {
       const statusKey = p.status ? p.status.toLowerCase() : 'lobby';
+      const formatted = formatParticipant(p, pairingMap, participantById);
 
       if (statusKey.includes('idle')) {
-        byStatus.waiting.push(p);
+        byStatus.waiting.push(formatted);
       } else if (statusKey.includes('match')) {
-        byStatus.in_match.push(p);
+        byStatus.in_match.push(formatted);
       } else if (statusKey.includes('bounty')) {
-        byStatus.in_bounty.push(p);
+        byStatus.in_bounty.push(formatted);
       } else if (statusKey.includes('cooldown')) {
-        byStatus.cooldown.push(p);
+        byStatus.cooldown.push(formatted);
       } else if (statusKey.includes('finished') || statusKey.includes('completed')) {
-        byStatus.finished.push(p);
+        byStatus.finished.push(formatted);
       } else if (statusKey.includes('disconnected')) {
-        byStatus.disconnected.push(p);
+        byStatus.disconnected.push(formatted);
       } else {
-        byStatus.lobby.push(p);
+        byStatus.lobby.push(formatted);
       }
     }
 
@@ -188,7 +239,7 @@ const broadcastLobbyUpdate = async () => {
       participants: {
         total: participantsList.length,
         byStatus,
-        all: participantsList
+        all: participantsList.map(p => formatParticipant(p, pairingMap, participantById))
       },
       // Legacy fields for backward compatibility
       isRoundActive: isActive,
@@ -289,7 +340,13 @@ export const round2Handler = (io, socket) => {
         if (loserParticipantStr) {
           const loserParticipant = JSON.parse(loserParticipantStr);
           if (loserParticipant.role === 'elite') {
-            await prisma.user.update({ where: { id: loserId }, data: { eventScore: { decrement: 2 } } });
+            // updateMany + gte guard keeps this atomic while flooring at 0 --
+            // a negative leaderboard score reads badly and also guarantees
+            // challenger status (and its 1.25x multiplier) as a side effect.
+            await prisma.user.updateMany({
+              where: { id: loserId, eventScore: { gte: 2 } },
+              data: { eventScore: { decrement: 2 } }
+            });
           }
         }
       }
@@ -319,8 +376,8 @@ export const round2Handler = (io, socket) => {
           p.status = `${p.role}:idle`;
           await redis.hset(keys.participants, pId, JSON.stringify(p));
         }
-        await redis.set(keys.cooldown(pId), "true", "EX", COOLDOWN_DURATION_S);
-        io.to(`user:${pId}`).emit("round2:cooldown", { duration: COOLDOWN_DURATION_S });
+        await redis.set(keys.cooldown(pId), "true", "EX", Math.ceil(COOLDOWN_DURATION_MS / 1000));
+        io.to(`user:${pId}`).emit("round2:cooldown", { duration: COOLDOWN_DURATION_MS });
       }
 
       await redis.del(keys.userMatch(challengerId), keys.userMatch(eliteId), matchKey);
@@ -519,17 +576,30 @@ export const round2Handler = (io, socket) => {
       await Promise.all([multi.exec(), ...dbUpdatePromises]);
       await broadcastLobbyUpdate();
 
-      // Broadcast current round update to all connected sockets
       try {
-        const currentRoundData = await getCurrentRound();
-        io.emit("server:currentRound", currentRoundData);
+        await broadcastCurrentRound(io);
       } catch (e) {
         console.error("Error broadcasting current round on R2 start:", e);
       }
 
-      // 🔑 Push canonical state to all participants after round start
+      // Push per-user state so the lobby can redirect to /r2/{role}
+      const startTime = endTime - ROUND_DURATION_MS;
       for (const player of players) {
-        io.to(`user:${player.id}`).emit("round2:getState");
+        io.to(`user:${player.id}`).emit("round2:state", {
+          success: true,
+          timestamp: Date.now(),
+          roundNumber: 2,
+          round: {
+            isActive: true,
+            status: "IN_PROGRESS",
+            startTime,
+            endTime,
+            timeRemaining: ROUND_DURATION_MS,
+            duration: ROUND_DURATION_MS,
+          },
+          currentUser: player,
+          roundSpecific: { role: player.role },
+        });
       }
       cb?.({ success: true });
     } catch (err) {
@@ -931,7 +1001,7 @@ export const round2Handler = (io, socket) => {
       if (challengerCooldown || eliteCooldown) return callback?.({ success: false, message: "One or both players are in cooldown." });
 
       const requestKey = keys.challengeRequest(challengerId, eliteId);
-      if (!(await redis.set(requestKey, "true", "EX", CHALLENGE_REQUEST_EXPIRY_S, "NX"))) return callback?.({ success: false, message: "Request already sent." });
+      if (!(await redis.set(requestKey, "true", "EX", Math.ceil(CHALLENGE_REQUEST_EXPIRY_MS / 1000), "NX"))) return callback?.({ success: false, message: "Request already sent." });
 
       await redis.multi().sadd(keys.pendingRequests(eliteId), challengerId).sadd(keys.outgoingRequests(challengerId), eliteId).exec();
 
@@ -947,10 +1017,10 @@ export const round2Handler = (io, socket) => {
             io.to(`user:${challengerId}`).emit("round2:challengeExpired", { eliteId, reason: "Request timed out." });
           }
         } catch (err) { console.error(`Error in request expiry for ${requestKey}:`, err); }
-      }, CHALLENGE_REQUEST_EXPIRY_S * 1000);
+      }, CHALLENGE_REQUEST_EXPIRY_MS);
       requestTimeouts.set(requestKey, timeoutId);
 
-      io.to(`user:${eliteId}`).emit("round2:challengeIncoming", { challenger: challengerP, expiresAt: Date.now() + CHALLENGE_REQUEST_EXPIRY_S * 1000 });
+      io.to(`user:${eliteId}`).emit("round2:challengeIncoming", { challenger: challengerP, expiresAt: Date.now() + CHALLENGE_REQUEST_EXPIRY_MS });
       callback?.({ success: true, message: "Challenge request sent." });
       await broadcastDashboardUpdates();
     } catch (err) {
@@ -1047,7 +1117,7 @@ export const round2Handler = (io, socket) => {
       for (const pId of [challengerId, eliteId]) {
         const pStr = await redis.hget(keys.participants, pId);
         const p = JSON.parse(pStr);
-        p.status = 'in-match';
+        p.status = 'in_match';
         await redis.hset(keys.participants, pId, JSON.stringify(p));
         await redis.set(keys.userMatch(pId), matchId);
       }
@@ -1076,7 +1146,10 @@ export const round2Handler = (io, socket) => {
 
       const rejectCount = await redis.incr(keys.rejectCount(eliteId));
       if (rejectCount >= 3) {
-        await prisma.user.update({ where: { id: eliteId }, data: { eventScore: { decrement: 20 } } });
+        await prisma.user.updateMany({
+          where: { id: eliteId, eventScore: { gte: 20 } },
+          data: { eventScore: { decrement: 20 } }
+        });
         await redis.del(keys.rejectCount(eliteId));
         io.to(`user:${eliteId}`).emit('round2:info', { message: "You lost 20 points for rejecting 3 challenges." });
       }
@@ -1202,6 +1275,7 @@ export const round2Handler = (io, socket) => {
         where: { roundNumber: 2 },
         data: { status: "LOBBY" },
       });
+      await broadcastCurrentRound(io);
 
       console.log("✅ [ADMIN] Round 2 reset complete");
       return true;
@@ -1263,8 +1337,12 @@ export const round2Handler = (io, socket) => {
   socket.on("round2:challengeAccept", handleChallengeAccept);
   socket.on("round2:challengeReject", handleChallengeReject);
   socket.on("round2:reset", handleRound2Reset);
-  socket.on("round2:matchEnd", handleMatchEnd);
-  socket.on("round2:bountyend", handleBountyEnd);
+  // NOTE: handleMatchEnd/handleBountyEnd are intentionally NOT bound to client
+  // socket events. They are internal-only, invoked via matchEndHandler/
+  // bountyEndHandler (set below, exposed through getRound2Handlers()) after
+  // submit.routes.js validates a real correct submission, and internally from
+  // handleDisconnect. Binding them to socket.on let any client end a match or
+  // fabricate a bounty submission for any user with arbitrary results.
 
 };
 
@@ -1487,6 +1565,7 @@ export const endRound2 = async (io, forceEnd = false) => {
       where: { roundNumber: 2 },
       data: { status: "COMPLETED" }
     });
+    await broadcastCurrentRound(io);
     console.log("✅ Round 2 status updated to COMPLETED");
 
     // Broadcast round ended to all clients
