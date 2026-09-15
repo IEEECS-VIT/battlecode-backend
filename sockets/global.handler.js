@@ -319,7 +319,7 @@ const handleGlobalViolation = async (io, socket, payload, callback) => {
   // }
   else if (currentRoundNumber === 3) {
     console.log("round 3 violation function call");
-    await handleRound3Violation(io, userId);
+    await handleRound3Violation(io, socket, userId);
   }
   else {
     if (callback) {
