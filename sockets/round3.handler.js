@@ -60,6 +60,60 @@ const resetRoundState = async () => {
 // Initialize state on server start
 initializeGlobalState();
 
+const broadcastLobbyUpdate = async (io) => {
+  try {
+    const keys = getRedisKeys();
+    const allParticipantsRaw = await redis.hgetall(keys.lobby);
+    const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
+      userId: uid,
+      ...JSON.parse(value)
+    }));
+
+    const round3DB = await prisma.round.findUnique({
+      where: { roundNumber: ROUND_NUMBER }
+    });
+
+    let timeRemaining = 0;
+    if (globalRoundState.isActive && globalRoundState.startTime) {
+      const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
+      timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
+    }
+
+    const byStatus = {
+      lobby: lobbyParticipants.filter(p => (p.status || 'lobby').toLowerCase() === 'lobby'),
+      waiting: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'waiting'),
+      in_match: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'in_match'),
+      cooldown: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'cooldown'),
+      finished: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'finished'),
+      disconnected: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'disconnected')
+    };
+
+    io.to(`round${ROUND_NUMBER}`).emit('lobby:round3', {
+      success: true,
+      timestamp: Date.now(),
+      roundNumber: ROUND_NUMBER,
+      round: {
+        isActive: globalRoundState.isActive,
+        status: round3DB?.status || 'LOBBY',
+        startTime: globalRoundState.startTime,
+        endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
+        timeRemaining,
+        duration: ROUND_DURATION
+      },
+      participants: {
+        total: lobbyParticipants.length,
+        byStatus,
+        all: lobbyParticipants
+      },
+      roundSpecific: {
+        isHackingPhase: globalRoundState.isHackingPhase
+      }
+    });
+  } catch (error) {
+    console.error('[ROUND 3] Error broadcasting lobby update:', error);
+  }
+};
+
 export const round3Handler = (io, socket) => {
 
   // ## UTILITY FUNCTIONS
@@ -71,66 +125,6 @@ export const round3Handler = (io, socket) => {
       return { error: 'Unauthorized - No user ID' };
     }
     return { userId };
-  };
-
-  const broadcastLobbyUpdate = async () => {
-    try {
-      const keys = getRedisKeys();
-      const allParticipantsRaw = await redis.hgetall(keys.lobby);
-      const lobbyParticipants = Object.entries(allParticipantsRaw).map(([uid, value]) => ({
-        userId: uid,
-        ...JSON.parse(value)
-      }));
-
-      // Get round status from database
-      const round3DB = await prisma.round.findUnique({
-        where: { roundNumber: ROUND_NUMBER }
-      });
-
-      // Calculate timeRemaining
-      let timeRemaining = 0;
-      if (globalRoundState.isActive && globalRoundState.startTime) {
-        const elapsed = Math.floor((Date.now() - globalRoundState.startTime) / 1000);
-        timeRemaining = Math.max(ROUND_DURATION - elapsed, 0);
-      }
-
-      // Group participants by status
-      const byStatus = {
-        lobby: lobbyParticipants.filter(p => (p.status || 'lobby').toLowerCase() === 'lobby'),
-        waiting: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'waiting'),
-        in_match: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'in_match'),
-        cooldown: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'cooldown'),
-        finished: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'finished'),
-        disconnected: lobbyParticipants.filter(p => (p.status || '').toLowerCase() === 'disconnected')
-      };
-
-      io.to(`round${ROUND_NUMBER}`).emit('lobby:round3', {
-        success: true,
-        timestamp: Date.now(),
-        roundNumber: ROUND_NUMBER,
-
-        round: {
-          isActive: globalRoundState.isActive,
-          status: round3DB?.status || 'LOBBY',
-          startTime: globalRoundState.startTime,
-          endTime: globalRoundState.startTime ? globalRoundState.startTime + (ROUND_DURATION * 1000) : null,
-          timeRemaining,
-          duration: ROUND_DURATION
-        },
-
-        participants: {
-          total: lobbyParticipants.length,
-          byStatus,
-          all: lobbyParticipants
-        },
-
-        roundSpecific: {
-          isHackingPhase: globalRoundState.isHackingPhase
-        }
-      });
-    } catch (error) {
-      console.error('[ROUND 3] Error broadcasting lobby update:', error);
-    }
   };
 
   const startGlobalTimer = (io) => {
@@ -241,7 +235,7 @@ export const round3Handler = (io, socket) => {
       }
       await redis.hset(getRedisKeys().lobby, userId, JSON.stringify(participantData));
       socket.join(`round${ROUND_NUMBER}`);
-      await broadcastLobbyUpdate();
+      await broadcastLobbyUpdate(io);
       console.log(`[ROUND 3] User ${user.username} (${userId}) joined the lobby.`);
       callback?.({ success: true, message: 'Successfully joined lobby.' });
     } catch (err) {
@@ -322,7 +316,7 @@ export const round3Handler = (io, socket) => {
       });
 
       // Broadcast updated lobby state with participants now in 'in_match'
-      await broadcastLobbyUpdate();
+      await broadcastLobbyUpdate(io);
 
       console.log(`[ROUND 3] Round started by user ${user.username}.`);
       callback?.({ success: true, message: 'Round 3 has started.' });
@@ -741,7 +735,7 @@ export const round3Handler = (io, socket) => {
       const keys = getRedisKeys();
       if (await redis.hget(keys.lobby, userId)) {
         await redis.hdel(keys.lobby, userId);
-        await broadcastLobbyUpdate();
+        await broadcastLobbyUpdate(io);
         console.log(`[ROUND 3] User ${userId} disconnected and was removed from the lobby.`);
       }
     } catch (err) {
@@ -852,7 +846,7 @@ export const round3AdminAddUser = async (io, userId, forceAdd = false) => {
     };
 
     await redis.hset(keys.lobby, userId, JSON.stringify(participant));
-    await broadcastLobbyUpdate();
+    await broadcastLobbyUpdate(io);
     io.to(`user:${userId}`).emit("round3:state", {
       success: true,
       roundNumber: 3,
@@ -963,7 +957,7 @@ export const endRound3 = async (io) => {
   }
 };
 
-export const handleRound3Violation = async (io, userId) => {
+export const handleRound3Violation = async (io, socket, userId) => {
 
 
   try {
@@ -990,7 +984,7 @@ export const handleRound3Violation = async (io, userId) => {
     socket.leave(`round${ROUND_NUMBER}`);
 
     // 5️⃣ Broadcast lobby update
-    await broadcastLobbyUpdate();
+    await broadcastLobbyUpdate(io);
 
     console.log(`[ROUND 3] User ${userId} disqualified successfully`);
 
