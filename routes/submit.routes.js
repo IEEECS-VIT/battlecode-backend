@@ -25,6 +25,7 @@ const HARD_API_TIMEOUT_MS = 15_000; // 15 seconds max polling timeout
 const POLL_INTERVAL_MS = 500; // 500ms polling interval
 const CPU_TIME_LIMIT = 2.0; // 2.0s CPU time limit
 const WALL_TIME_LIMIT = 3.0; // 3.0s Wall time limit (terminates infinite loops instantly)
+const MEMORY_LIMIT_KB = 128000; // 128 MB (Judge0 default; Java may need a bump)
 const SESSION_GRACE_MS = 30_000; // 30 seconds
 
 const LANGUAGE_ID_MAP = {
@@ -35,6 +36,62 @@ const LANGUAGE_ID_MAP = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isTimeLimitExceeded = (r) =>
+  r.status?.id === 5 ||
+  (r.time && parseFloat(r.time) >= CPU_TIME_LIMIT) ||
+  (r.status?.description || "").toLowerCase().includes("time limit exceeded");
+
+const isMemoryLimitExceeded = (r) => {
+  // Never override an Accepted test — high usage on a passing case is not MLE.
+  if (r.status?.id === 3) return false;
+
+  const desc = (r.status?.description || "").toLowerCase();
+  const msg = (r.message || "").toLowerCase();
+  const mem = parseInt(r.memory, 10) || 0;
+  const stderr = r.stderr || "";
+
+  if (
+    desc.includes("memory limit") ||
+    msg.includes("memory limit") ||
+    stderr.includes("MemoryError")
+  ) {
+    return true;
+  }
+
+  // Isolate usually reports OOM as a runtime signal; only then is usage-at-cap MLE.
+  return r.status?.id >= 7 && mem >= MEMORY_LIMIT_KB;
+};
+
+const resolveSubmissionStatus = (
+  results,
+  passedCount,
+  totalCount,
+  alreadyTimedOut
+) => {
+  if (alreadyTimedOut || results.some(isTimeLimitExceeded)) {
+    return "TIME_LIMIT_EXCEEDED";
+  }
+  if (results.some(isMemoryLimitExceeded)) {
+    return "MEMORY_LIMIT_EXCEEDED";
+  }
+  if (passedCount === totalCount && totalCount > 0) {
+    return "ACCEPTED";
+  }
+  if (results.some((r) => r.status?.id === 6 || !!r.compile_output)) {
+    return "COMPILATION_ERROR";
+  }
+  if (
+    results.some(
+      (r) =>
+        r.status?.id >= 7 ||
+        (r.stderr && !isTimeLimitExceeded(r) && !isMemoryLimitExceeded(r))
+    )
+  ) {
+    return "RUNTIME_ERROR";
+  }
+  return "WRONG_ANSWER";
+};
 
 const getRound1RedisKeys = () => ({
   matches: `round1:matches`,
@@ -82,6 +139,7 @@ router.post("/run", async (req, res) => {
       expected_output: tc.expected_output || tc.output || "",
       cpu_time_limit: CPU_TIME_LIMIT,
       wall_time_limit: WALL_TIME_LIMIT,
+      memory_limit: MEMORY_LIMIT_KB,
       max_processes_and_or_threads: 60,
     }));
 
@@ -129,11 +187,17 @@ router.post("/run", async (req, res) => {
     }
 
     const passed = results.filter((r) => r.status?.id === 3).length;
+    const status = resolveSubmissionStatus(
+      results,
+      passed,
+      sampleTestCases.length,
+      false
+    );
 
     res.json({
       success: true,
       results,
-      summary: { passed, total: sampleTestCases.length },
+      summary: { passed, total: sampleTestCases.length, status },
     });
   } catch (err) {
     console.error("[RUN ERROR]", err);
@@ -376,6 +440,7 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
       expected_output: testCase.expected_output || testCase.output || "",
       cpu_time_limit: CPU_TIME_LIMIT,
       wall_time_limit: WALL_TIME_LIMIT,
+      memory_limit: MEMORY_LIMIT_KB,
       max_processes_and_or_threads: 60,
       index: idx,
     }));
@@ -429,37 +494,13 @@ router.post("/submit", verifyAuthToken, async (req, res) => {
 
     const passedCount = results.filter((r) => r.status?.id === 3).length;
     const totalCount = allTestCases.length;
-    
-/** ✅ FINAL STATUS RESOLUTION */
-if (submissionStatus === "TIME_LIMIT_EXCEEDED") {
-  // already set by hard timeout
-} else if (
-  results.some(
-    (r) =>
-      r.status?.id === 5 ||
-      (r.time && parseFloat(r.time) >= CPU_TIME_LIMIT) ||
-      r.status?.description?.toLowerCase().includes("time limit exceeded")
-  )
-) {
-  submissionStatus = "TIME_LIMIT_EXCEEDED";
-} else if (passedCount === totalCount && totalCount > 0) {
-  submissionStatus = "ACCEPTED";
-} else if (
-  results.some((r) => r.status?.id === 6 || !!r.compile_output)
-) {
-  submissionStatus = "COMPILATION_ERROR";
-} else if (
-  results.some(
-    (r) =>
-      r.status?.id >= 7 ||
-      (r.stderr &&
-        !r.status?.description?.toLowerCase().includes("time limit"))
-  )
-) {
-  submissionStatus = "RUNTIME_ERROR";
-} else {
-  submissionStatus = "WRONG_ANSWER";
-}
+    const alreadyTimedOut = submissionStatus === "TIME_LIMIT_EXCEEDED";
+    submissionStatus = resolveSubmissionStatus(
+      results,
+      passedCount,
+      totalCount,
+      alreadyTimedOut
+    );
 
     const existingSubmission = await prisma.submission.findFirst({
       where: { userId, problemId },
