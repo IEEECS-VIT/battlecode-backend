@@ -153,12 +153,8 @@ export const round3Handler = (io, socket) => {
 
         if (timeRemaining <= 0) {
           clearInterval(globalRoundState.timerInterval);
-          globalRoundState.isActive = false;
-          await prisma.round.update({ where: { roundNumber: ROUND_NUMBER }, data: { status: 'COMPLETED' } });
-          await redis.set(getRedisKeys().state, 'COMPLETED');
-          await broadcastCurrentRound(io);
-          io.to(`round${ROUND_NUMBER}`).emit('round3:ended', { message: 'Round 3 has ended!' });
-          console.log('[ROUND 3] Round has officially ended.');
+          globalRoundState.timerInterval = null;
+          await endRound3(io);
         } else {
           io.to(`round${ROUND_NUMBER}`).emit('round3:timer', { timeRemaining });
         }

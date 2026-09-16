@@ -22,6 +22,7 @@ let matchEndHandler = null;
 let bountyEndHandler = null;
 let lobbyUpdateInterval = null;
 let dashboardUpdateInterval = null;
+let roundEndTimeout = null;
 const requestTimeouts = new Map();
 const disconnectTimeouts = new Map();
 
@@ -549,6 +550,8 @@ export const round2Handler = (io, socket) => {
 
       const endTime = Date.now() + ROUND_DURATION_MS;
       await redis.multi().set(keys.roundStarted, "true").set(keys.roundEndTime, endTime).exec();
+      if (roundEndTimeout) clearTimeout(roundEndTimeout);
+      roundEndTimeout = setTimeout(() => endRound2(io, false), ROUND_DURATION_MS);
 
       const participantsData = await redis.hgetall(keys.participants);
       const players = Object.values(participantsData || {}).map(p => JSON.parse(p));
@@ -1513,6 +1516,11 @@ export const endRound2 = async (io, forceEnd = false) => {
   console.log("--- ENDING ROUND 2 ---");
 
   try {
+    if (roundEndTimeout) {
+      clearTimeout(roundEndTimeout);
+      roundEndTimeout = null;
+    }
+
     // Stop intervals
     if (lobbyUpdateInterval) {
       clearInterval(lobbyUpdateInterval);

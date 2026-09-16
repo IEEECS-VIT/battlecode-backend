@@ -163,32 +163,8 @@ export const round0Handler = (io, socket) => {
 
         if (timeRemaining <= 0) {
           clearInterval(globalRoundState.timerInterval);
-          globalRoundState.isActive = false;
-
-          try {
-            await prisma.round.update({
-              where: { roundNumber: 0 },
-              data: { status: 'COMPLETED' } // UPPERCASE for database
-            });
-            await broadcastCurrentRound(io);
-          } catch (error) {
-            console.error('Error updating Round 0 database status to COMPLETED:', error);
-          }
-
-          io.to('round0').emit('round0:end', {
-            message: 'Round 0 has ended!',
-            duration: ROUND_DURATION_MS,
-            totalParticipants: globalRoundState.participants.size
-          });
-
-          const keys = getRedisKeys();
-          const allParticipantsRaw = await redis.hgetall(keys.lobby);
-          for (const [participantId, participantDataRaw] of Object.entries(allParticipantsRaw)) {
-            const participantData = JSON.parse(participantDataRaw);
-            participantData.status = 'finished'; // lowercase for Redis
-            participantData.finishedAt = new Date().toISOString();
-            await redis.hset(keys.lobby, participantId, JSON.stringify(participantData));
-          }
+          globalRoundState.timerInterval = null;
+          await endRound0(io);
         } else {
           io.to('round0').emit('round0:timer', {
             timeRemaining,
