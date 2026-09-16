@@ -163,6 +163,19 @@ const updatePlayerRole = async () => {
   }
 };
 
+const getRound2Role = async (userId) => {
+  const keys = getRedisKeys();
+  const [pStr, cachedRole] = await Promise.all([
+    redis.hget(keys.participants, userId),
+    redis.get(keys.role(userId)),
+  ]);
+  if (pStr) {
+    const role = JSON.parse(pStr).role;
+    if (role) return role;
+  }
+  return cachedRole || null;
+};
+
 
 const broadcastLobbyUpdate = async () => {
   if (!round2IO) return;
@@ -355,17 +368,21 @@ export const round2Handler = (io, socket) => {
 
       await updatePlayerRole();
 
+      const winnerRole = await getRound2Role(winnerId);
       io.to(`user:${winnerId}`).emit("round2:matchResult", {
         winnerId,
         loserId,
-        reason
+        reason,
+        newRole: winnerRole,
       });
 
       if (loserId) {
+        const loserRole = await getRound2Role(loserId);
         io.to(`user:${loserId}`).emit("round2:matchResult", {
           winnerId,
           loserId,
-          reason
+          reason,
+          newRole: loserRole,
         });
       }
 
@@ -405,12 +422,13 @@ export const round2Handler = (io, socket) => {
         .sadd(keys.attemptedBounties(userId), questionId)
         .exec();
 
+      await updatePlayerRole();
+
       io.to(`user:${userId}`).emit("round2:bountyEnded", {
         questionId,
-        reason: isCorrect ? "completed" : "incorrect"
+        reason: isCorrect ? "completed" : "incorrect",
+        newRole: await getRound2Role(userId),
       });
-
-      await updatePlayerRole();
 
       const pStr = await redis.hget(keys.participants, userId);
       if (pStr) {
