@@ -7,7 +7,7 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 
 // Round 2
-const ROUND_DURATION_MS = 1 * HOUR;        // 90 minutes total round window
+const ROUND_DURATION_MS = 1.25 * HOUR;        // 90 minutes total round window
 const MATCH_DURATION_MS = 25 * MINUTE;       // 25 minutes per match
 
 const COOLDOWN_DURATION_MS = 30 * SECOND;              // 30 seconds
@@ -1122,14 +1122,34 @@ export const round2Handler = (io, socket) => {
       cleanupMulti.del(keys.pendingRequests(eliteId));
       await cleanupMulti.exec();
 
-      // const question = await prisma.problem.find({ where: { difficulty: 'R2_CHALLENGE' }});
-
-      const questions = await prisma.problem.findMany({
-        where: { difficulty: 'R2_CHALLENGE' }
+      const attemptedByPair = await prisma.submission.findMany({
+        where: {
+          userId: { in: [challengerId, eliteId] },
+          problem: { difficulty: 'R2_CHALLENGE' }
+        },
+        select: { problemId: true },
+        distinct: ['problemId']
       });
 
-      const question = questions[Math.floor(Math.random() * questions.length)];
-      if (!question) throw new Error("No R2_CHALLENGE question found in database.");
+      const attemptedQuestionIds = new Set(attemptedByPair.map(s => s.problemId));
+      const unattemptedQuestions = await prisma.problem.findMany({
+        where: {
+          difficulty: 'R2_CHALLENGE',
+          id: { notIn: [...attemptedQuestionIds] }
+        }
+      });
+
+      const question = unattemptedQuestions.length > 0
+        ? unattemptedQuestions[Math.floor(Math.random() * unattemptedQuestions.length)]
+        : null;
+
+      if (!question) {
+        await redis.del(lockKey);
+        return callback?.({
+          success: false,
+          message: "No unattempted R2_CHALLENGE questions remain for this pair."
+        });
+      }
 
       const matchId = `match:${challengerId}:${eliteId}:${Date.now()}`;
       const endTime = Date.now() + MATCH_DURATION_MS;
