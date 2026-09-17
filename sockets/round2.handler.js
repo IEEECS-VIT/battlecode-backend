@@ -405,7 +405,7 @@ export const round2Handler = (io, socket) => {
     }
   };
 
-  const handleBountyEnd = async (userId, questionId, isCorrect, submissionData) => {
+  const handleBountyEnd = async (userId, questionId, isCorrect, submissionData, reason) => {
     try {
       const sessionKey = keys.bountySession(userId, questionId);
       const session = await redis.hgetall(sessionKey);
@@ -427,7 +427,7 @@ export const round2Handler = (io, socket) => {
 
       io.to(`user:${userId}`).emit("round2:bountyEnded", {
         questionId,
-        reason: isCorrect ? "completed" : "incorrect",
+        reason: reason ?? (isCorrect ? "completed" : "incorrect"),
         newRole: await getRound2Role(userId),
       });
 
@@ -1397,27 +1397,42 @@ export const round2AdminAddUser = async (io, userId) => {
     }
 
     const existing = await redis.hget(keys.participants, userId);
-    if (existing) {
-      io.to(`user:${userId}`).emit("round2:adminAdded");
-      return;
-    }
-    const participant = {
-      id: userId,
-      username: user.username,
-      eventScore: user.eventScore,
-      role: null,
-      status: roundDB.status === "IN_PROGRESS" ? "idle" : "lobby"
-    };
+    if (!existing) {
+      const participant = {
+        id: userId,
+        username: user.username,
+        eventScore: user.eventScore,
+        role: null,
+        status: roundDB.status === "IN_PROGRESS" ? "idle" : "lobby"
+      };
 
-    await redis.hset(keys.participants, userId, JSON.stringify(participant));
-    await updatePlayerRole();
-
-    if (roundDB.status === "IN_PROGRESS") {
-      io.to(`user:${userId}`).emit("round2:getState");
-    } else {
-      io.to(`user:${userId}`).emit("round2:adminAdded");
+      await redis.hset(keys.participants, userId, JSON.stringify(participant));
+      // Add-back must not resume a leftover match/bounty on getState
+      await redis.del(keys.userMatch(userId), keys.activeBounty(userId));
+      await updatePlayerRole();
     }
 
+    let newRole = await getRound2Role(userId);
+    if (newRole !== "elite" && newRole !== "challenger") {
+      if (existing) await updatePlayerRole();
+      newRole = await getRound2Role(userId);
+      if (newRole !== "elite" && newRole !== "challenger") newRole = "challenger";
+    }
+
+    if (!existing) {
+      const pStr = await redis.hget(keys.participants, userId);
+      if (pStr) {
+        const p = JSON.parse(pStr);
+        p.role = newRole;
+        if (roundDB.status === "IN_PROGRESS") {
+          p.status = `${newRole}:idle`;
+        }
+        await redis.hset(keys.participants, userId, JSON.stringify(p));
+        await redis.set(keys.role(userId), newRole);
+      }
+    }
+
+    io.to(`user:${userId}`).emit("round2:adminAdded", { newRole, role: newRole });
     io.emit("admin:success", { action: "add", userId, round: 2 });
 
   } catch (err) {
@@ -1604,6 +1619,66 @@ export const endRound2 = async (io, forceEnd = false) => {
   } catch (error) {
     console.error("❌ Error ending Round 2:", error);
     throw error;
+  }
+};
+
+export const handleRound2Violation = async (io, userId) => {
+  try {
+    const keys = getRedisKeys();
+    const matchId = await redis.get(keys.userMatch(userId));
+
+    if (matchId) {
+      const matchDataStr = await redis.get(keys.matchInfo(matchId));
+      if (!matchDataStr) {
+        console.warn(`[R2 Violation] No match data for ${userId}`);
+        return;
+      }
+
+      const matchData = JSON.parse(matchDataStr);
+      const opponentId = matchData.challengerId === userId ? matchData.eliteId : matchData.challengerId;
+      if (!opponentId) return;
+
+      const { matchEndHandler } = getRound2Handlers();
+      if (!matchEndHandler) {
+        console.warn("[R2 Violation] matchEndHandler not initialized");
+        return;
+      }
+
+      console.warn(`[R2 Violation] User ${userId} forfeiting match ${matchId}`);
+      await matchEndHandler(matchId, opponentId, "violation");
+
+      io.to(`user:${userId}`).emit("round2:violationForfeit", {
+        newRole: await getRound2Role(userId),
+      });
+      io.to(`user:${opponentId}`).emit("round2:opponentViolated", {
+        newRole: await getRound2Role(opponentId),
+      });
+      return;
+    }
+
+    const activeBountyKey = await redis.get(keys.activeBounty(userId));
+    if (!activeBountyKey) {
+      console.warn(`[R2 Violation] No active session for ${userId}`);
+      return;
+    }
+
+    const session = await redis.hgetall(activeBountyKey);
+    const questionId = session?.questionId;
+    if (!questionId) {
+      console.warn(`[R2 Violation] No bounty question for ${userId}`);
+      return;
+    }
+
+    const { bountyEndHandler } = getRound2Handlers();
+    if (!bountyEndHandler) {
+      console.warn("[R2 Violation] bountyEndHandler not initialized");
+      return;
+    }
+
+    console.warn(`[R2 Violation] User ${userId} forfeiting bounty ${questionId}`);
+    await bountyEndHandler(userId, questionId, false, null, "violation");
+  } catch (err) {
+    console.error("[R2 Violation Handler Error]", err);
   }
 };
 
