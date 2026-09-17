@@ -31,7 +31,7 @@ import { broadcastCurrentRound } from "./global.handler.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
-const ROUND_DURATION_MS = 20 * MINUTE; // 20 minutes
+const ROUND_DURATION_MS = 45 * MINUTE; //45 minutes
 const ROUND_NUMBER = 0;
 
 let globalRoundState = {
